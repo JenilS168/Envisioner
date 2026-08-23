@@ -50,6 +50,7 @@ export default function Canvas2D({
   doors,
   windows = [],
   closedLoops = [],
+  materials = {},
   mode,
   selectedId,
   onAddWall,
@@ -457,7 +458,8 @@ export default function Canvas2D({
         {walls.map((wall) => {
           const isSel = wall.id === selectedId;
           const isHov = wall.id === hoveredWallId;
-          let stroke = '#3b82f6';
+          // Use the global wall color for normal state so it matches 3D view
+          let stroke = materials.wallColor || '#3b82f6';
           if (isSel) stroke = '#22c55e';
           else if (isHov) stroke = '#f59e0b';
           return (

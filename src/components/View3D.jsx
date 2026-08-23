@@ -4,28 +4,123 @@ import { OrbitControls, Grid } from '@react-three/drei';
 import * as THREE from 'three';
 
 // ---------------------------------------------------------------------------
-// Colour / material palette
+// Procedural canvas textures — no external images, works offline
 // ---------------------------------------------------------------------------
-const WALL_COLOR       = '#f1f5f9';
-const WALL_SEL_COLOR   = '#86efac';
-const FRAME_COLOR      = '#3d3225';   // dark brown-grey door frame
-const PANEL_COLOR      = '#8B6914';   // warm wood-brown door panel
-const PANEL_SEL_COLOR  = '#a3e635';
-const WIN_FRAME_COLOR  = '#e2e8f0';   // light grey/white window frame
-const WIN_FRAME_SEL    = '#86efac';
-const GLASS_COLOR      = '#7dd3fc';   // light-blue glass
-const GLASS_SEL        = '#bbf7d0';
-const ROOF_COLOR       = '#334155';   // modern slate/charcoal roof
+
+function makeBrickTexture() {
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = size; canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#b5651d';
+  ctx.fillRect(0, 0, size, size);
+  ctx.fillStyle = '#c8753e';
+  const brickW = 64, brickH = 32, gap = 4;
+  for (let row = 0; row < size / brickH; row++) {
+    const offsetX = (row % 2 === 0) ? 0 : brickW / 2;
+    for (let col = -1; col < size / brickW + 1; col++) {
+      ctx.fillRect(col * brickW + offsetX + gap / 2, row * brickH + gap / 2, brickW - gap, brickH - gap);
+    }
+  }
+  ctx.strokeStyle = '#8b4513';
+  ctx.lineWidth = gap;
+  return new THREE.CanvasTexture(canvas);
+}
+
+function makeConcreteTexture(tint = '#94a3b8') {
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = size; canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = tint;
+  ctx.fillRect(0, 0, size, size);
+  // Add noise
+  for (let i = 0; i < 4000; i++) {
+    const x = Math.random() * size;
+    const y = Math.random() * size;
+    const r = Math.random() * 2;
+    const alpha = Math.random() * 0.12;
+    ctx.fillStyle = `rgba(0,0,0,${alpha})`;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  return new THREE.CanvasTexture(canvas);
+}
+
+function makeWoodTexture(tint = '#8b5a2b') {
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = size; canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = tint;
+  ctx.fillRect(0, 0, size, size);
+  // Horizontal grain lines
+  const grainCount = 18;
+  for (let i = 0; i < grainCount; i++) {
+    const y = (i / grainCount) * size;
+    const grainWidth = 1 + Math.random() * 2;
+    ctx.strokeStyle = `rgba(0,0,0,${0.08 + Math.random() * 0.1})`;
+    ctx.lineWidth = grainWidth;
+    ctx.beginPath();
+    ctx.moveTo(0, y + Math.random() * 4);
+    ctx.bezierCurveTo(size * 0.3, y + Math.random() * 8, size * 0.7, y - Math.random() * 8, size, y + Math.random() * 4);
+    ctx.stroke();
+  }
+  return new THREE.CanvasTexture(canvas);
+}
+
+function makeTilesTexture(tint = '#555555') {
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = size; canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = tint;
+  ctx.fillRect(0, 0, size, size);
+  const tileW = 64, tileH = 40, gap = 3;
+  ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+  ctx.lineWidth = gap;
+  for (let row = 0; row < size / tileH + 1; row++) {
+    for (let col = 0; col < size / tileW + 1; col++) {
+      ctx.strokeRect(col * tileW + gap / 2, row * tileH + gap / 2, tileW - gap, tileH - gap);
+    }
+  }
+  return new THREE.CanvasTexture(canvas);
+}
+
+function makeMetalTexture(tint = '#708090') {
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = size; canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const grad = ctx.createLinearGradient(0, 0, size, size);
+  grad.addColorStop(0, tint);
+  grad.addColorStop(0.5, '#c0c8d0');
+  grad.addColorStop(1, tint);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
+  // Horizontal corrugation lines
+  for (let i = 0; i < 16; i++) {
+    const y = (i / 16) * size;
+    ctx.fillStyle = `rgba(255,255,255,0.07)`;
+    ctx.fillRect(0, y, size, 6);
+  }
+  return new THREE.CanvasTexture(canvas);
+}
 
 // ---------------------------------------------------------------------------
 // WallSegment — a single box slab (part of a wall)
 // ---------------------------------------------------------------------------
-function WallSegment({ position, angle, length, height, thickness, isSelected, onClick }) {
+function WallSegment({ position, angle, length, height, thickness, isSelected, onClick, wallColor, wallTexture }) {
   if (length <= 0 || height <= 0) return null;
   return (
     <mesh position={position} rotation={[0, -angle, 0]} castShadow receiveShadow onClick={onClick}>
       <boxGeometry args={[length, height, thickness]} />
-      <meshStandardMaterial color={isSelected ? WALL_SEL_COLOR : WALL_COLOR} roughness={0.7} />
+      <meshStandardMaterial
+        color={isSelected ? '#86efac' : wallColor}
+        map={!isSelected ? wallTexture : null}
+        roughness={0.7}
+      />
     </mesh>
   );
 }
@@ -33,7 +128,7 @@ function WallSegment({ position, angle, length, height, thickness, isSelected, o
 // ---------------------------------------------------------------------------
 // Door3D — frame + openable panel
 // ---------------------------------------------------------------------------
-function Door3D({ door, wallStart, wallAngle, wallUx, wallUz, wallLength, wallThickness, isSelected, onClick }) {
+function Door3D({ door, wallStart, wallAngle, wallUx, wallUz, wallLength, wallThickness, isSelected, onClick, frameColor, panelColor }) {
   const { position: tPos, width: doorW, height: doorH, isOpen } = door;
   const centreMetre = tPos * wallLength;
   const worldX = wallStart.x + wallUx * centreMetre;
@@ -45,8 +140,8 @@ function Door3D({ door, wallStart, wallAngle, wallUx, wallUz, wallLength, wallTh
   const panelH = doorH - frameThick * 2;
   const panelDepth = 0.04;
   const hingeAngle = isOpen ? (85 * Math.PI) / 180 : 0;
-  const color = isSelected ? PANEL_SEL_COLOR : PANEL_COLOR;
-  const frameCol = isSelected ? '#6b9c45' : FRAME_COLOR;
+  const color = isSelected ? '#a3e635' : panelColor;
+  const frameCol = isSelected ? '#6b9c45' : frameColor;
 
   return (
     <group position={[worldX, 0, worldZ]} rotation={[0, -wallAngle, 0]}
@@ -90,7 +185,7 @@ function Door3D({ door, wallStart, wallAngle, wallUx, wallUz, wallLength, wallTh
 // ---------------------------------------------------------------------------
 // Window3D — frame + semi-transparent glass pane
 // ---------------------------------------------------------------------------
-function Window3D({ win, wallStart, wallAngle, wallUx, wallUz, wallLength, wallThickness, isSelected, onClick }) {
+function Window3D({ win, wallStart, wallAngle, wallUx, wallUz, wallLength, wallThickness, isSelected, onClick, frameColor, glassColor }) {
   const { position: tPos, width: winW, height: winH, sillHeight } = win;
   const centreMetre = tPos * wallLength;
   const worldX = wallStart.x + wallUx * centreMetre;
@@ -102,8 +197,8 @@ function Window3D({ win, wallStart, wallAngle, wallUx, wallUz, wallLength, wallT
   const glassH = winH - frameThick * 2;
   const glassDepth = 0.01;
 
-  const frameCol = isSelected ? WIN_FRAME_SEL : WIN_FRAME_COLOR;
-  const glassCol = isSelected ? GLASS_SEL : GLASS_COLOR;
+  const frameCol = isSelected ? '#86efac' : frameColor;
+  const glassCol = isSelected ? '#bbf7d0' : glassColor;
 
   return (
     <group
@@ -160,7 +255,7 @@ function Window3D({ win, wallStart, wallAngle, wallUx, wallUz, wallLength, wallT
 // ---------------------------------------------------------------------------
 // FlatRoof3D — extruded flat slab over a closed wall loop
 // ---------------------------------------------------------------------------
-function FlatRoof3D({ loop, wallHeight = 3 }) {
+function FlatRoof3D({ loop, wallHeight = 3, roofColor, roofTexture }) {
   const { points } = loop;
 
   const shape = useMemo(() => {
@@ -195,7 +290,8 @@ function FlatRoof3D({ loop, wallHeight = 3 }) {
     >
       <extrudeGeometry args={[shape, extrudeSettings]} />
       <meshStandardMaterial
-        color={ROOF_COLOR}
+        color={roofColor}
+        map={roofTexture || null}
         roughness={0.6}
         metalness={0.1}
         side={THREE.DoubleSide}
@@ -206,24 +302,20 @@ function FlatRoof3D({ loop, wallHeight = 3 }) {
 
 // ---------------------------------------------------------------------------
 // GableRoof3D — hip-style pitched roof that pitches inward from all edges
-// Works robustly for any irregular closed polygon.
 // ---------------------------------------------------------------------------
-function GableRoof3D({ loop, wallHeight = 3, roofHeight = 1.5 }) {
+function GableRoof3D({ loop, wallHeight = 3, roofHeight = 1.5, roofColor, roofTexture }) {
   const { points } = loop;
 
   const roofGeometry = useMemo(() => {
     const geom = new THREE.BufferGeometry();
     if (!points || points.length < 3) return geom;
 
-    // Calculate centroid for the peak
     let cx = 0, cy = 0;
     points.forEach(p => { cx += p.x; cy += p.y; });
     cx /= points.length;
     cy /= points.length;
 
-    // Add a slight overhang
     const overhang = 0.25;
-
     const roofPositions = [];
     const peakY = wallHeight + roofHeight;
     const eaveY = wallHeight;
@@ -232,39 +324,30 @@ function GableRoof3D({ loop, wallHeight = 3, roofHeight = 1.5 }) {
       const p1 = points[i];
       const p2 = points[(i + 1) % points.length];
 
-      // To create an overhang, we extend the vector from peak to p1, and peak to p2
-      const dx1 = p1.x - cx;
-      const dz1 = p1.y - cy;
+      const dx1 = p1.x - cx; const dz1 = p1.y - cy;
       const len1 = Math.hypot(dx1, dz1);
       const ex1 = len1 > 0 ? p1.x + (dx1 / len1) * overhang : p1.x;
       const ez1 = len1 > 0 ? p1.y + (dz1 / len1) * overhang : p1.y;
 
-      const dx2 = p2.x - cx;
-      const dz2 = p2.y - cy;
+      const dx2 = p2.x - cx; const dz2 = p2.y - cy;
       const len2 = Math.hypot(dx2, dz2);
       const ex2 = len2 > 0 ? p2.x + (dx2 / len2) * overhang : p2.x;
       const ez2 = len2 > 0 ? p2.y + (dz2 / len2) * overhang : p2.y;
 
-      // Roof slope triangle (Peak, eave2, eave1) facing outwards/upwards
-      roofPositions.push(
-        cx, peakY, cy,
-        ex2, eaveY, ez2,
-        ex1, eaveY, ez1
-      );
+      roofPositions.push(cx, peakY, cy, ex2, eaveY, ez2, ex1, eaveY, ez1);
     }
 
     geom.setAttribute('position', new THREE.Float32BufferAttribute(roofPositions, 3));
     geom.computeVertexNormals();
-
     return geom;
   }, [points, wallHeight, roofHeight]);
 
   return (
     <group>
-      {/* Pitched Roof Panels */}
       <mesh geometry={roofGeometry} castShadow receiveShadow>
         <meshStandardMaterial
-          color={ROOF_COLOR}
+          color={roofColor}
+          map={roofTexture || null}
           roughness={0.55}
           metalness={0.15}
           side={THREE.DoubleSide}
@@ -277,7 +360,7 @@ function GableRoof3D({ loop, wallHeight = 3, roofHeight = 1.5 }) {
 // ---------------------------------------------------------------------------
 // Wall3D — renders one wall with cutouts for both doors AND windows
 // ---------------------------------------------------------------------------
-function Wall3D({ wall, wallDoors, wallWindows, isSelected, selectedId, onWallClick, onDoorClick, onWindowClick }) {
+function Wall3D({ wall, wallDoors, wallWindows, isSelected, selectedId, onWallClick, onDoorClick, onWindowClick, materials, wallTexture }) {
   const { start, end, height, thickness } = wall;
 
   const geom = useMemo(() => {
@@ -290,7 +373,6 @@ function Wall3D({ wall, wallDoors, wallWindows, isSelected, selectedId, onWallCl
     return { dx, dz, length, angle, ux, uz };
   }, [start, end]);
 
-  // Build ALL cuts from doors and windows combined, sorted along wall
   const cuts = useMemo(() => {
     const allOpenings = [
       ...wallDoors.map((d) => ({
@@ -318,7 +400,6 @@ function Wall3D({ wall, wallDoors, wallWindows, isSelected, selectedId, onWallCl
       .sort((a, b) => a.start - b.start);
   }, [wallDoors, wallWindows, geom, height]);
 
-  // Decompose wall into solid segments
   const segments = useMemo(() => {
     const result = [];
     let cursor = 0;
@@ -348,7 +429,6 @@ function Wall3D({ wall, wallDoors, wallWindows, isSelected, selectedId, onWallCl
     return [x, midY, z];
   }
 
-  // No openings — single solid wall
   if (cuts.length === 0) {
     const midX = start.x + (end.x - start.x) / 2;
     const midZ = start.y + (end.y - start.y) / 2;
@@ -357,6 +437,8 @@ function Wall3D({ wall, wallDoors, wallWindows, isSelected, selectedId, onWallCl
         position={[midX, height / 2, midZ]}
         angle={geom.angle} length={geom.length} height={height} thickness={thickness}
         isSelected={isSelected}
+        wallColor={materials.wallColor}
+        wallTexture={wallTexture}
         onClick={(e) => { e.stopPropagation(); onWallClick && onWallClick(); }}
       />
     );
@@ -364,7 +446,6 @@ function Wall3D({ wall, wallDoors, wallWindows, isSelected, selectedId, onWallCl
 
   return (
     <>
-      {/* Wall segments */}
       {segments.map((seg, i) => (
         <WallSegment
           key={`seg-${i}`}
@@ -374,11 +455,12 @@ function Wall3D({ wall, wallDoors, wallWindows, isSelected, selectedId, onWallCl
           height={seg.yTop - seg.yBottom}
           thickness={thickness}
           isSelected={isSelected}
+          wallColor={materials.wallColor}
+          wallTexture={wallTexture}
           onClick={(e) => { e.stopPropagation(); onWallClick && onWallClick(); }}
         />
       ))}
 
-      {/* Door meshes */}
       {wallDoors.map((door) => (
         <Door3D
           key={door.id}
@@ -387,11 +469,12 @@ function Wall3D({ wall, wallDoors, wallWindows, isSelected, selectedId, onWallCl
           wallUx={geom.ux} wallUz={geom.uz}
           wallLength={geom.length} wallThickness={thickness}
           isSelected={door.id === selectedId}
+          frameColor={materials.doorFrameColor}
+          panelColor={materials.doorPanelColor}
           onClick={() => onDoorClick && onDoorClick(door.id)}
         />
       ))}
 
-      {/* Window meshes */}
       {wallWindows.map((win) => (
         <Window3D
           key={win.id}
@@ -400,6 +483,8 @@ function Wall3D({ wall, wallDoors, wallWindows, isSelected, selectedId, onWallCl
           wallUx={geom.ux} wallUz={geom.uz}
           wallLength={geom.length} wallThickness={thickness}
           isSelected={win.id === selectedId}
+          frameColor={materials.windowFrameColor}
+          glassColor={materials.windowGlassColor}
           onClick={() => onWindowClick && onWindowClick(win.id)}
         />
       ))}
@@ -410,7 +495,7 @@ function Wall3D({ wall, wallDoors, wallWindows, isSelected, selectedId, onWallCl
 // ---------------------------------------------------------------------------
 // Floor3D — a clickable slab representing the floor of a closed loop/room
 // ---------------------------------------------------------------------------
-function Floor3D({ loop, isSelected, onClick }) {
+function Floor3D({ loop, isSelected, onClick, floorColor }) {
   const { points } = loop;
 
   const shape = useMemo(() => {
@@ -432,6 +517,8 @@ function Floor3D({ loop, isSelected, onClick }) {
     []
   );
 
+  const baseColor = floorColor || '#94a3b8';
+
   return (
     <mesh
       position={[0, 0, 0]}
@@ -441,10 +528,10 @@ function Floor3D({ loop, isSelected, onClick }) {
     >
       <extrudeGeometry args={[shape, extrudeSettings]} />
       <meshStandardMaterial
-        color={isSelected ? '#86efac' : '#94a3b8'}
+        color={isSelected ? '#86efac' : baseColor}
         roughness={0.9}
         transparent
-        opacity={isSelected ? 0.8 : 0.4}
+        opacity={isSelected ? 0.8 : 0.55}
       />
     </mesh>
   );
@@ -453,17 +540,52 @@ function Floor3D({ loop, isSelected, onClick }) {
 // ---------------------------------------------------------------------------
 // View3D — top-level 3D scene
 // ---------------------------------------------------------------------------
+
+const DEFAULT_MATERIALS = {
+  wallColor: '#d6c2a1',
+  wallPreset: 'plain',
+  doorFrameColor: '#4b2e1e',
+  doorPanelColor: '#8b5a2b',
+  windowFrameColor: '#eeeeee',
+  windowGlassColor: '#78c7e8',
+  roofColor: '#555555',
+  roofPreset: 'plain',
+};
+
 export default function View3D({
   walls,
   doors,
   windows = [],
   rooms = [],
   closedLoops = [],
+  materials: materialsProp = {},
   selectedId,
   mode,
   onSelect,
   onToggleDoor,
 }) {
+  // Merge with defaults for backward compatibility
+  const materials = { ...DEFAULT_MATERIALS, ...materialsProp };
+
+  // Build wall texture based on preset (memoized so it's not rebuilt on every render)
+  const wallTexture = useMemo(() => {
+    switch (materials.wallPreset) {
+      case 'brick':     return makeBrickTexture();
+      case 'concrete':  return makeConcreteTexture(materials.wallColor);
+      case 'wood':      return makeWoodTexture(materials.wallColor);
+      default:          return null;
+    }
+  }, [materials.wallPreset, materials.wallColor]);
+
+  // Build roof texture based on preset
+  const roofTexture = useMemo(() => {
+    switch (materials.roofPreset) {
+      case 'tiles':  return makeTilesTexture(materials.roofColor);
+      case 'metal':  return makeMetalTexture(materials.roofColor);
+      default:       return null;
+    }
+  }, [materials.roofPreset, materials.roofColor]);
+
   function handleRoomClick(roomId) {
     if (mode === 'select') onSelect && onSelect(roomId);
   }
@@ -512,6 +634,8 @@ export default function View3D({
                 wallWindows={ww}
                 isSelected={isSel || wd.some((d) => d.id === selectedId) || ww.some((w) => w.id === selectedId)}
                 selectedId={selectedId}
+                materials={materials}
+                wallTexture={wallTexture}
                 onWallClick={() => handleWallClick(wall.id)}
                 onDoorClick={(id) => handleDoorClick(id)}
                 onWindowClick={(id) => handleWindowClick(id)}
@@ -521,7 +645,7 @@ export default function View3D({
         </group>
 
         {/* Floors & Roofs rendering over closed loops */}
-        {closedLoops.map((loop, idx) => {
+        {closedLoops.map((loop) => {
           const room = rooms.find(r => r.id === loop.id) || {};
           const roof = room.roof;
           const isSel = loop.id === selectedId;
@@ -531,6 +655,7 @@ export default function View3D({
               <Floor3D
                 loop={loop}
                 isSelected={isSel}
+                floorColor={room.floorColor}
                 onClick={() => handleRoomClick(loop.id)}
               />
               {roof && roof.enabled && (
@@ -539,11 +664,15 @@ export default function View3D({
                     loop={loop}
                     wallHeight={3}
                     roofHeight={roof.height || 1.5}
+                    roofColor={materials.roofColor}
+                    roofTexture={roofTexture}
                   />
                 ) : (
                   <FlatRoof3D
                     loop={loop}
                     wallHeight={3}
+                    roofColor={materials.roofColor}
+                    roofTexture={roofTexture}
                   />
                 )
               )}

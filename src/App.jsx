@@ -10,13 +10,28 @@ import { findClosedLoops } from './utils/geometry';
 import './index.css';
 
 // ---------------------------------------------------------------------------
-// Initial (empty) design — includes walls, doors, windows, and roof config
+// Default material palette — used when no materials key is present
+// ---------------------------------------------------------------------------
+const DEFAULT_MATERIALS = {
+  wallColor: '#d6c2a1',
+  wallPreset: 'plain',      // 'plain' | 'brick' | 'concrete' | 'wood'
+  doorFrameColor: '#4b2e1e',
+  doorPanelColor: '#8b5a2b',
+  windowFrameColor: '#eeeeee',
+  windowGlassColor: '#78c7e8',
+  roofColor: '#555555',
+  roofPreset: 'plain',      // 'plain' | 'tiles' | 'metal'
+};
+
+// ---------------------------------------------------------------------------
+// Initial (empty) design — includes walls, doors, windows, rooms, and materials
 // ---------------------------------------------------------------------------
 const INITIAL_DESIGN = {
   walls: [],
   doors: [],
   windows: [],
-  rooms: [], // array of { id, roof: { enabled, type, height, pitch } }
+  rooms: [], // array of { id, roof: { enabled, type, height, pitch }, floorColor }
+  materials: { ...DEFAULT_MATERIALS },
 };
 
 // ---------------------------------------------------------------------------
@@ -44,6 +59,12 @@ function App() {
 
   // Compute closed loops at the top level so they can be passed down to Canvas2D, View3D, Sidebar
   const closedLoops = React.useMemo(() => findClosedLoops(design.walls), [design.walls]);
+
+  // Backward compatibility: ensure materials key always exists
+  const materials = React.useMemo(
+    () => ({ ...DEFAULT_MATERIALS, ...(design.materials || {}) }),
+    [design.materials]
+  );
 
   // Backward compatibility migration: If an old design with global `roof` is loaded,
   // migrate it to `rooms` for all current closed loops.
@@ -102,6 +123,30 @@ function App() {
       pushState({
         ...design,
         rooms: [...(design.rooms || []), { id: roomId, roof: roofData }],
+      });
+    }
+  }, [design, pushState]);
+
+  /** Update global material settings (wall color, presets, door colors, etc.) */
+  const handleUpdateMaterials = useCallback((patch) => {
+    pushState({
+      ...design,
+      materials: { ...materials, ...patch },
+    });
+  }, [design, materials, pushState]);
+
+  /** Update the floor color for a specific room/structure */
+  const handleUpdateRoomFloor = useCallback((roomId, floorColor) => {
+    const existingRoom = (design.rooms || []).find((r) => r.id === roomId);
+    if (existingRoom) {
+      pushState({
+        ...design,
+        rooms: design.rooms.map((r) => (r.id === roomId ? { ...r, floorColor } : r)),
+      });
+    } else {
+      pushState({
+        ...design,
+        rooms: [...(design.rooms || []), { id: roomId, floorColor }],
       });
     }
   }, [design, pushState]);
@@ -276,6 +321,7 @@ function App() {
             doors={design.doors}
             windows={design.windows}
             closedLoops={closedLoops}
+            materials={materials}
             mode={mode}
             selectedId={selectedId}
             onAddWall={handleAddWall}
@@ -297,6 +343,7 @@ function App() {
             windows={design.windows}
             rooms={design.rooms || []}
             closedLoops={closedLoops}
+            materials={materials}
             selectedId={selectedId}
             mode={mode}
             onSelect={handleSelect}
@@ -304,12 +351,15 @@ function App() {
           />
         </div>
 
-        {/* SIDEBAR — Structure & Roof settings */}
+        {/* SIDEBAR — Structure & Roof settings + Materials */}
         <Sidebar
           selectedId={selectedId}
           closedLoops={closedLoops}
           rooms={design.rooms || []}
+          materials={materials}
           onUpdateRoomRoof={handleUpdateRoomRoof}
+          onUpdateMaterials={handleUpdateMaterials}
+          onUpdateRoomFloor={handleUpdateRoomFloor}
           isOpen={sidebarOpen}
           onToggleOpen={() => setSidebarOpen((prev) => !prev)}
         />
