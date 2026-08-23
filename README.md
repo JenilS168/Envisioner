@@ -1,16 +1,52 @@
-# React + Vite
+# Envisioner
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+A 2D home design and 3D visualization platform that helps users visualize architectural spaces before construction.
 
-Currently, two official plugins are available:
+## Current Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- Draw walls on a 2D grid.
+- View walls in a live 3D scene.
+- Add visible doors with frames and panels.
+- Add visible windows with frames and glass panes.
+- Move, select, and delete walls, doors, and windows.
+- Undo and redo design changes.
+- Create roofs for arbitrary closed wall structures.
+- Choose whether each closed structure has a roof.
+- Choose flat or gable roofs and customize the gable angle.
+- Save and load house designs as JSON.
 
-## React Compiler
+## Technology Stack
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- React
+- Three.js
+- React Three Fiber
+- JavaScript
+- Vite
 
-## Expanding the Oxlint configuration
+## Running Locally
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+To run the project locally, install dependencies and start the development server:
+
+```bash
+npm install
+npm run dev
+```
+
+The development server normally runs at [http://localhost:5173](http://localhost:5173).
+
+## Project Status
+
+Envisioner is an active prototype. The current focus is the core 2D-to-3D home-design experience.
+
+## Planned Features
+
+- Wall and floor materials.
+- Interior furniture and decoration.
+- Importing 2D floor plans.
+- AI-generated house design options.
+- AR and VR house tours.
+- Exporting models for external visualization.
+
+## Disclaimer
+
+Envisioner is a visualization and planning tool. It does not replace a qualified architect, structural engineer, building-code review, or professional construction drawings.
