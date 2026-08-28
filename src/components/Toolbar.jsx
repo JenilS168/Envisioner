@@ -1,12 +1,12 @@
 import React from 'react';
-import { PenLine, DoorOpen, MousePointer2, SquareStack } from 'lucide-react';
+import { PenLine, DoorOpen, MousePointer2, SquareStack, Box } from 'lucide-react';
 
 /**
  * Toolbar — lets the user switch between
- * "Select", "Draw Wall", "Add Door", and "Add Window" modes.
+ * "Select", "Draw Wall", "Add Door", "Add Window", and "Place Furniture" modes.
  *
  * Props:
- *   mode         — current active mode ('wall' | 'door' | 'window' | 'select')
+ *   mode         — current active mode ('wall' | 'door' | 'window' | 'select' | 'furniture')
  *   onModeChange — called with the new mode string
  */
 export default function Toolbar({ mode, onModeChange }) {
@@ -17,7 +17,7 @@ export default function Toolbar({ mode, onModeChange }) {
         id="btn-mode-select"
         className={`btn toolbar-btn ${mode === 'select' ? 'toolbar-btn-active' : ''}`}
         onClick={() => onModeChange('select')}
-        title="Select walls, doors, or windows to move or delete them"
+        title="Select walls, doors, windows, or furniture to move or delete them"
       >
         <MousePointer2 size={16} />
         Select
@@ -56,6 +56,19 @@ export default function Toolbar({ mode, onModeChange }) {
       >
         <SquareStack size={16} />
         Add Window
+      </button>
+
+      <div className="toolbar-separator" />
+
+      {/* Place Furniture mode */}
+      <button
+        id="btn-mode-furniture"
+        className={`btn toolbar-btn ${mode === 'furniture' ? 'toolbar-btn-active' : ''}`}
+        onClick={() => onModeChange('furniture')}
+        title="Place furniture items inside closed rooms"
+      >
+        <Box size={16} />
+        Furniture
       </button>
     </div>
   );

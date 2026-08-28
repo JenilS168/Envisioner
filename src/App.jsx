@@ -1,50 +1,52 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import Header from './components/Header';
 import Toolbar from './components/Toolbar';
+import FloorBar from './components/FloorBar';
 import Sidebar from './components/Sidebar';
 import Canvas2D from './components/Canvas2D';
 import View3D from './components/View3D';
 import DebugPanel from './components/DebugPanel';
 import useHistory from './hooks/useHistory';
 import { findClosedLoops } from './utils/geometry';
+import { FURNITURE_CATALOG } from './utils/furniture';
+import {
+  DEFAULT_MATERIALS,
+  makeEmptyFloor,
+  migrateToFloors,
+  updateFloorInDesign,
+  getFloorBaseY,
+  defaultFloorLabel,
+} from './utils/floors';
 import './index.css';
 
 // ---------------------------------------------------------------------------
-// Default material palette — used when no materials key is present
+// Initial design — a single Ground Floor with empty content.
 // ---------------------------------------------------------------------------
-const DEFAULT_MATERIALS = {
-  wallColor: '#d6c2a1',
-  wallPreset: 'plain',      // 'plain' | 'brick' | 'concrete' | 'wood'
-  doorFrameColor: '#4b2e1e',
-  doorPanelColor: '#8b5a2b',
-  windowFrameColor: '#eeeeee',
-  windowGlassColor: '#78c7e8',
-  roofColor: '#555555',
-  roofPreset: 'plain',      // 'plain' | 'tiles' | 'metal'
-};
-
-// ---------------------------------------------------------------------------
-// Initial (empty) design — includes walls, doors, windows, rooms, and materials
-// ---------------------------------------------------------------------------
-const INITIAL_DESIGN = {
-  walls: [],
-  doors: [],
-  windows: [],
-  rooms: [], // array of { id, roof: { enabled, type, height, pitch }, floorColor }
-  materials: { ...DEFAULT_MATERIALS },
-};
+const INITIAL_DESIGN = migrateToFloors(null); // { floors: [{ id:'floor-0', label:'Ground Floor', ... }] }
 
 // ---------------------------------------------------------------------------
 // App — root component.
 //
-// All mutation logic lives here. Canvas2D, View3D, and Sidebar read from
-// the design JSON and call callbacks to request changes.
+// State layout:
+//   useHistory manages `design = { floors: [{ id, label, walls, doors, windows,
+//                                             rooms, materials, furniture }] }`.
+//   `activeFloorId` and `showAllFloors` are plain useState — not undoable.
+//   All mutations write into the active floor via updateFloorInDesign().
+//
+// Undo/redo pattern for continuous interactions (drag, slider, color picker):
+//   1. onXxxStart  — save `design` into snapRef (the "before" snapshot)
+//   2. onXxxLive   — call setStateOnly(newDesign) — no history entry
+//   3. onXxxCommit — call pushState(newDesign, snapshot) — single undo entry
+//
+// Discrete actions (add, delete, place, toggle, R-key, dropdown) call
+// pushState(newDesign) directly — unchanged.
 // ---------------------------------------------------------------------------
 function App() {
   // ---- History-managed design state ----
   const {
     state: design,
     pushState,
+    setStateOnly,
     undo,
     redo,
     canUndo,
@@ -53,209 +55,505 @@ function App() {
   } = useHistory(INITIAL_DESIGN);
 
   // ---- UI state (not part of the design model) ----
-  const [mode, setMode] = useState('wall');           // 'wall' | 'door' | 'window' | 'select'
-  const [selectedId, setSelectedId] = useState(null); // wall, door, window, or room/loop id
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [activeFloorId, setActiveFloorId]   = useState('floor-0');
+  const [showAllFloors, setShowAllFloors]    = useState(false);
+  const [mode, setMode]                      = useState('wall');
+  const [selectedId, setSelectedId]          = useState(null);
+  const [sidebarOpen, setSidebarOpen]        = useState(true);
+  const [selectedFurnitureType, setSelectedFurnitureType] = useState('bed');
+  const [snapRotation, setSnapRotation]      = useState(true);
 
-  // Compute closed loops at the top level so they can be passed down to Canvas2D, View3D, Sidebar
-  const closedLoops = React.useMemo(() => findClosedLoops(design.walls), [design.walls]);
+  // ---- Interaction snapshots — saved at drag/interaction START ----
+  const snapRef = useRef(null);
 
-  // Backward compatibility: ensure materials key always exists
-  const materials = React.useMemo(
-    () => ({ ...DEFAULT_MATERIALS, ...(design.materials || {}) }),
-    [design.materials]
+  // ---- Migration effect: wrap old flat saves into floors format ----
+  useEffect(() => {
+    if (design && !Array.isArray(design.floors)) {
+      // Legacy flat design detected — migrate it.
+      const migrated = migrateToFloors(design);
+      pushState(migrated);
+      setActiveFloorId(migrated.floors[0].id);
+    }
+  }, []); // run once on mount only
+
+  // ---- Legacy roof migration (within any floor) ----
+  // If an old design had a global `roof` key on a floor, migrate it to `rooms`.
+  useEffect(() => {
+    if (!design || !Array.isArray(design.floors)) return;
+    const needsMigration = design.floors.some((f) => f.roof !== undefined);
+    if (!needsMigration) return;
+    const newFloors = design.floors.map((f) => {
+      if (f.roof === undefined) return f;
+      const loops = findClosedLoops(f.walls || []);
+      const migratedRooms = loops.map((loop) => ({ id: loop.id, roof: { ...f.roof } }));
+      const { roof: _removed, ...rest } = f;
+      return { ...rest, rooms: migratedRooms };
+    });
+    pushState({ ...design, floors: newFloors });
+  }, [design, pushState]);
+
+  // ---- Keep activeFloorId valid: if the active floor was deleted, fall back ----
+  useEffect(() => {
+    if (!design || !Array.isArray(design.floors)) return;
+    const exists = design.floors.some((f) => f.id === activeFloorId);
+    if (!exists && design.floors.length > 0) {
+      setActiveFloorId(design.floors[0].id);
+    }
+  }, [design, activeFloorId]);
+
+  // ---- Active floor — the floor currently being edited ----
+  const activeFloor = useMemo(() => {
+    if (!design || !Array.isArray(design.floors)) return null;
+    return design.floors.find((f) => f.id === activeFloorId) || design.floors[0] || null;
+  }, [design, activeFloorId]);
+
+  // ---- Convenience: active floor's arrays ----
+  const walls     = activeFloor?.walls     || [];
+  const doors     = activeFloor?.doors     || [];
+  const windows   = activeFloor?.windows   || [];
+  const rooms     = activeFloor?.rooms     || [];
+  const furniture = activeFloor?.furniture || [];
+
+  // Compute closed loops from the active floor's walls
+  const closedLoops = useMemo(() => findClosedLoops(walls), [walls]);
+
+  // Materials for the active floor (per-floor, with defaults filled in)
+  const materials = useMemo(
+    () => ({ ...DEFAULT_MATERIALS, ...(activeFloor?.materials || {}) }),
+    [activeFloor?.materials]
   );
 
-  // Backward compatibility migration: If an old design with global `roof` is loaded,
-  // migrate it to `rooms` for all current closed loops.
-  useEffect(() => {
-    if (design && design.roof !== undefined) {
-      const migratedRooms = closedLoops.map((loop) => ({
-        id: loop.id,
-        roof: { ...design.roof },
-      }));
-      const migratedDesign = { ...design, rooms: migratedRooms };
-      delete migratedDesign.roof; // remove the global roof object
-      pushState(migratedDesign);
-    }
-  }, [design, closedLoops, pushState]);
+  // ---- Helper: build updated design with a patch applied to the active floor ----
+  const withActiveFloor = useCallback(
+    (patch) => updateFloorInDesign(design, activeFloorId, patch),
+    [design, activeFloorId]
+  );
 
   // -----------------------------------------------------------------------
-  // Design mutation handlers
+  // FLOOR management handlers (undoable add/delete)
   // -----------------------------------------------------------------------
 
-  /** Add a newly drawn wall */
-  const handleAddWall = useCallback((wallData) => {
-    const newWall = { ...wallData, id: `wall-${Date.now()}` };
-    pushState({
-      ...design,
-      walls: [...design.walls, newWall],
-    });
+  /** Add a new empty floor above the current highest. */
+  const handleAddFloor = useCallback(() => {
+    const floors = design.floors || [];
+    const newIndex = floors.length;
+    const label = defaultFloorLabel(newIndex);
+    const newFloor = makeEmptyFloor(label);
+    const newDesign = { ...design, floors: [...floors, newFloor] };
+    pushState(newDesign);
+    setActiveFloorId(newFloor.id);
   }, [design, pushState]);
+
+  /** Delete a floor by id (must not be the last remaining floor). */
+  const handleDeleteFloor = useCallback((floorId) => {
+    const floors = design.floors || [];
+    if (floors.length <= 1) return; // prevent deleting last floor
+    const newFloors = floors.filter((f) => f.id !== floorId);
+    pushState({ ...design, floors: newFloors });
+    // activeFloorId is updated by the useEffect above
+  }, [design, pushState]);
+
+  // -----------------------------------------------------------------------
+  // DISCRETE handlers — each calls pushState once, no snapshot needed.
+  // (All now scoped to the active floor via withActiveFloor())
+  // -----------------------------------------------------------------------
+
+  /** Add a newly drawn wall — stamps per-wall material from current global defaults */
+  const handleAddWall = useCallback((wallData) => {
+    const newWall = {
+      ...wallData,
+      id: `wall-${Date.now()}`,
+      material: {
+        color: materials.wallColor,
+        preset: materials.wallPreset,
+      },
+    };
+    pushState(withActiveFloor({ walls: [...walls, newWall] }));
+  }, [withActiveFloor, walls, materials, pushState]);
 
   /** Add a door onto a wall */
   const handleAddDoor = useCallback((doorData) => {
     const newDoor = { ...doorData, id: `door-${Date.now()}`, isOpen: doorData.isOpen ?? false };
-    pushState({
-      ...design,
-      doors: [...design.doors, newDoor],
-    });
-  }, [design, pushState]);
+    pushState(withActiveFloor({ doors: [...doors, newDoor] }));
+  }, [withActiveFloor, doors, pushState]);
 
   /** Add a window onto a wall */
   const handleAddWindow = useCallback((windowData) => {
     const newWindow = { ...windowData, id: `window-${Date.now()}` };
-    pushState({
-      ...design,
-      windows: [...design.windows, newWindow],
-    });
-  }, [design, pushState]);
+    pushState(withActiveFloor({ windows: [...windows, newWindow] }));
+  }, [withActiveFloor, windows, pushState]);
 
-  /** Update roof settings for a specific room */
+  /** Update roof settings for a specific room (toggle, type change — discrete) */
   const handleUpdateRoomRoof = useCallback((roomId, roofData) => {
-    const existingRoom = (design.rooms || []).find((r) => r.id === roomId);
-    if (existingRoom) {
-      pushState({
-        ...design,
-        rooms: design.rooms.map((r) => (r.id === roomId ? { ...r, roof: roofData } : r)),
-      });
-    } else {
-      pushState({
-        ...design,
-        rooms: [...(design.rooms || []), { id: roomId, roof: roofData }],
-      });
-    }
-  }, [design, pushState]);
+    const existingRoom = rooms.find((r) => r.id === roomId);
+    const newRooms = existingRoom
+      ? rooms.map((r) => (r.id === roomId ? { ...r, roof: roofData } : r))
+      : [...rooms, { id: roomId, roof: roofData }];
+    pushState(withActiveFloor({ rooms: newRooms }));
+  }, [withActiveFloor, rooms, pushState]);
 
-  /** Update global material settings (wall color, presets, door colors, etc.) */
-  const handleUpdateMaterials = useCallback((patch) => {
-    pushState({
-      ...design,
+  /** Apply a material patch to ALL walls AND update the active floor's global default */
+  const handleApplyWallMaterialToAll = useCallback((patch) => {
+    pushState(withActiveFloor({
       materials: { ...materials, ...patch },
-    });
-  }, [design, materials, pushState]);
+      walls: walls.map((w) => ({ ...w, material: { ...(w.material || {}), ...patch } })),
+    }));
+  }, [withActiveFloor, walls, materials, pushState]);
 
-  /** Update the floor color for a specific room/structure */
-  const handleUpdateRoomFloor = useCallback((roomId, floorColor) => {
-    const existingRoom = (design.rooms || []).find((r) => r.id === roomId);
-    if (existingRoom) {
-      pushState({
-        ...design,
-        rooms: design.rooms.map((r) => (r.id === roomId ? { ...r, floorColor } : r)),
-      });
-    } else {
-      pushState({
-        ...design,
-        rooms: [...(design.rooms || []), { id: roomId, floorColor }],
-      });
-    }
-  }, [design, pushState]);
+  /** Apply roof material patch to ALL rooms AND update global defaults */
+  const handleApplyRoofMaterialToAll = useCallback((patch) => {
+    pushState(withActiveFloor({
+      materials: { ...materials, ...patch },
+      rooms: rooms.map((r) => ({ ...r, roof: { ...(r.roof || {}), ...patch } })),
+    }));
+  }, [withActiveFloor, rooms, materials, pushState]);
+
+  /** Place a new furniture item */
+  const handleAddFurniture = useCallback((data) => {
+    const item = { scale: 1.0, rotation: 0, ...data, id: `furn-${Date.now()}` };
+    pushState(withActiveFloor({ furniture: [...furniture, item] }));
+  }, [withActiveFloor, furniture, pushState]);
 
   /** Toggle a door open / closed */
   const handleToggleDoor = useCallback((doorId) => {
-    pushState({
-      ...design,
-      doors: design.doors.map((d) =>
-        d.id === doorId ? { ...d, isOpen: !d.isOpen } : d,
-      ),
-    });
-  }, [design, pushState]);
+    pushState(withActiveFloor({
+      doors: doors.map((d) => d.id === doorId ? { ...d, isOpen: !d.isOpen } : d),
+    }));
+  }, [withActiveFloor, doors, pushState]);
 
-  /** Delete whatever is currently selected (wall, door, or window).
-   *  Deleting a wall also deletes all its doors AND windows (no orphans). */
+  /** Rotate a furniture item by 15° clockwise — keyboard shortcut (R key). */
+  const handleRotateFurniture = useCallback((id) => {
+    pushState(withActiveFloor({
+      furniture: furniture.map((f) =>
+        f.id === id ? { ...f, rotation: (((f.rotation ?? 0) + 15) % 360 + 360) % 360 } : f
+      ),
+    }));
+  }, [withActiveFloor, furniture, pushState]);
+
+  /** Delete whatever is currently selected */
   const handleDeleteSelected = useCallback(() => {
     if (!selectedId) return;
 
-    // Is it a wall?
-    if (design.walls.some((w) => w.id === selectedId)) {
-      pushState({
-        ...design,
-        walls: design.walls.filter((w) => w.id !== selectedId),
-        doors: design.doors.filter((d) => d.wallId !== selectedId),
-        windows: design.windows.filter((w) => w.wallId !== selectedId),
-      });
+    if (walls.some((w) => w.id === selectedId)) {
+      const newWalls = walls.filter((w) => w.id !== selectedId);
+      const survivingLoopIds = new Set(findClosedLoops(newWalls).map((l) => l.id));
+      pushState(withActiveFloor({
+        walls: newWalls,
+        doors: doors.filter((d) => d.wallId !== selectedId),
+        windows: windows.filter((w) => w.wallId !== selectedId),
+        furniture: furniture.filter((f) => survivingLoopIds.has(f.roomId)),
+      }));
       setSelectedId(null);
       return;
     }
-
-    // Is it a door?
-    if (design.doors.some((d) => d.id === selectedId)) {
-      pushState({
-        ...design,
-        doors: design.doors.filter((d) => d.id !== selectedId),
-      });
+    if (doors.some((d) => d.id === selectedId)) {
+      pushState(withActiveFloor({ doors: doors.filter((d) => d.id !== selectedId) }));
       setSelectedId(null);
       return;
     }
-
-    // Is it a window?
-    if (design.windows.some((w) => w.id === selectedId)) {
-      pushState({
-        ...design,
-        windows: design.windows.filter((w) => w.id !== selectedId),
-      });
+    if (windows.some((w) => w.id === selectedId)) {
+      pushState(withActiveFloor({ windows: windows.filter((w) => w.id !== selectedId) }));
       setSelectedId(null);
+      return;
     }
-  }, [selectedId, design, pushState]);
+    if (furniture.some((f) => f.id === selectedId)) {
+      pushState(withActiveFloor({ furniture: furniture.filter((f) => f.id !== selectedId) }));
+      setSelectedId(null);
+      return;
+    }
+  }, [selectedId, withActiveFloor, walls, doors, windows, furniture, pushState]);
 
   /** Clear the entire design and history */
   const handleClear = useCallback(() => {
     reset(INITIAL_DESIGN);
+    setActiveFloorId('floor-0');
     setSelectedId(null);
   }, [reset]);
 
-  /** Select (or deselect) a wall, door, or window */
-  const handleSelect = useCallback((id) => {
-    setSelectedId(id);
+  /** Select (or deselect) a wall, door, window, room, or furniture */
+  const handleSelect = useCallback((id) => { setSelectedId(id); }, []);
+
+  /** Activate a furniture type and switch to furniture-placement mode */
+  const handleSelectFurnitureType = useCallback((type) => {
+    setSelectedFurnitureType(type);
+    setMode('furniture');
   }, []);
 
   // -----------------------------------------------------------------------
-  // Move handlers
+  // CONTINUOUS handlers — three phases: start / live / commit
   // -----------------------------------------------------------------------
 
-  /** Slide a door along its wall */
+  // ----- Furniture: move -----
+
+  const handleFurnMoveStart = useCallback(() => {
+    snapRef.current = design;
+  }, [design]);
+
+  const handleMoveFurniture = useCallback((id, x, y) => {
+    setStateOnly(withActiveFloor({
+      furniture: furniture.map((f) => f.id === id ? { ...f, x, y } : f),
+    }));
+  }, [withActiveFloor, furniture, setStateOnly]);
+
+  const handleCommitMoveFurniture = useCallback((id, x, y) => {
+    const snap = snapRef.current;
+    snapRef.current = null;
+    pushState(withActiveFloor({
+      furniture: furniture.map((f) => f.id === id ? { ...f, x, y } : f),
+    }), snap);
+  }, [withActiveFloor, furniture, pushState]);
+
+  // ----- Furniture: rotate (drag handle) -----
+
+  const handleFurnRotateStart = useCallback(() => {
+    snapRef.current = design;
+  }, [design]);
+
+  const handleSetFurnitureRotation = useCallback((id, degrees) => {
+    const normalized = ((degrees % 360) + 360) % 360;
+    setStateOnly(withActiveFloor({
+      furniture: furniture.map((f) => f.id === id ? { ...f, rotation: normalized } : f),
+    }));
+  }, [withActiveFloor, furniture, setStateOnly]);
+
+  const handleCommitFurnitureRotation = useCallback((id, degrees) => {
+    const snap = snapRef.current;
+    snapRef.current = null;
+    const normalized = ((degrees % 360) + 360) % 360;
+    pushState(withActiveFloor({
+      furniture: furniture.map((f) => f.id === id ? { ...f, rotation: normalized } : f),
+    }), snap);
+  }, [withActiveFloor, furniture, pushState]);
+
+  // ----- Furniture: scale slider -----
+
+  const handleFurnScaleStart = useCallback(() => {
+    snapRef.current = design;
+  }, [design]);
+
+  const handleUpdateFurnitureScale = useCallback((id, scale) => {
+    const clamped = Math.max(0.8, Math.min(1.5, parseFloat(scale) || 1.0));
+    setStateOnly(withActiveFloor({
+      furniture: furniture.map((f) => f.id === id ? { ...f, scale: clamped } : f),
+    }));
+  }, [withActiveFloor, furniture, setStateOnly]);
+
+  const handleCommitFurnitureScale = useCallback((id, scale) => {
+    const snap = snapRef.current;
+    snapRef.current = null;
+    const clamped = Math.max(0.8, Math.min(1.5, parseFloat(scale) || 1.0));
+    pushState(withActiveFloor({
+      furniture: furniture.map((f) => f.id === id ? { ...f, scale: clamped } : f),
+    }), snap);
+  }, [withActiveFloor, furniture, pushState]);
+
+  // ----- Furniture: color picker -----
+
+  const handleFurnColorStart = useCallback(() => {
+    snapRef.current = design;
+  }, [design]);
+
+  const handleUpdateFurnitureColor = useCallback((id, color) => {
+    setStateOnly(withActiveFloor({
+      furniture: furniture.map((f) => f.id === id ? { ...f, color } : f),
+    }));
+  }, [withActiveFloor, furniture, setStateOnly]);
+
+  const handleCommitFurnitureColor = useCallback((id, color) => {
+    const snap = snapRef.current;
+    snapRef.current = null;
+    pushState(withActiveFloor({
+      furniture: furniture.map((f) => f.id === id ? { ...f, color } : f),
+    }), snap);
+  }, [withActiveFloor, furniture, pushState]);
+
+  // ----- Wall: material (color picker) -----
+
+  const handleWallMatStart = useCallback(() => {
+    snapRef.current = design;
+  }, [design]);
+
+  const handleUpdateWallMaterial = useCallback((wallId, patch) => {
+    setStateOnly(withActiveFloor({
+      walls: walls.map((w) =>
+        w.id === wallId ? { ...w, material: { ...(w.material || {}), ...patch } } : w
+      ),
+    }));
+  }, [withActiveFloor, walls, setStateOnly]);
+
+  const handleCommitWallMaterial = useCallback((wallId, patch) => {
+    const snap = snapRef.current;
+    snapRef.current = null;
+    pushState(withActiveFloor({
+      walls: walls.map((w) =>
+        w.id === wallId ? { ...w, material: { ...(w.material || {}), ...patch } } : w
+      ),
+    }), snap);
+  }, [withActiveFloor, walls, pushState]);
+
+  // ----- Wall: dimensions sliders (height, thickness) -----
+
+  const handleWallDimStart = useCallback(() => {
+    snapRef.current = design;
+  }, [design]);
+
+  const handleUpdateWallDimensions = useCallback((wallId, patch) => {
+    setStateOnly(withActiveFloor({
+      walls: walls.map((w) => w.id === wallId ? { ...w, ...patch } : w),
+    }));
+  }, [withActiveFloor, walls, setStateOnly]);
+
+  const handleCommitWallDimensions = useCallback((wallId, patch) => {
+    const snap = snapRef.current;
+    snapRef.current = null;
+    pushState(withActiveFloor({
+      walls: walls.map((w) => w.id === wallId ? { ...w, ...patch } : w),
+    }), snap);
+  }, [withActiveFloor, walls, pushState]);
+
+  // ----- Roof: material (color picker) — per room -----
+
+  const handleRoofMatStart = useCallback(() => {
+    snapRef.current = design;
+  }, [design]);
+
+  const handleUpdateRoomRoofMaterial = useCallback((roomId, patch) => {
+    const existingRoom = rooms.find((r) => r.id === roomId);
+    const newRooms = existingRoom
+      ? rooms.map((r) => r.id === roomId ? { ...r, roof: { ...(r.roof || {}), ...patch } } : r)
+      : [...rooms, { id: roomId, roof: { ...patch } }];
+    setStateOnly(withActiveFloor({ rooms: newRooms }));
+  }, [withActiveFloor, rooms, setStateOnly]);
+
+  const handleCommitRoofMaterial = useCallback((roomId, patch) => {
+    const snap = snapRef.current;
+    snapRef.current = null;
+    const existingRoom = rooms.find((r) => r.id === roomId);
+    const newRooms = existingRoom
+      ? rooms.map((r) => r.id === roomId ? { ...r, roof: { ...(r.roof || {}), ...patch } } : r)
+      : [...rooms, { id: roomId, roof: { ...patch } }];
+    pushState(withActiveFloor({ rooms: newRooms }), snap);
+  }, [withActiveFloor, rooms, pushState]);
+
+  // ----- Roof: height slider -----
+
+  const handleRoofHeightStart = useCallback(() => {
+    snapRef.current = design;
+  }, [design]);
+
+  const handleUpdateRoomRoofHeight = useCallback((roomId, roofData) => {
+    const existingRoom = rooms.find((r) => r.id === roomId);
+    const newRooms = existingRoom
+      ? rooms.map((r) => r.id === roomId ? { ...r, roof: roofData } : r)
+      : [...rooms, { id: roomId, roof: roofData }];
+    setStateOnly(withActiveFloor({ rooms: newRooms }));
+  }, [withActiveFloor, rooms, setStateOnly]);
+
+  const handleCommitRoofHeight = useCallback((roomId, roofData) => {
+    const snap = snapRef.current;
+    snapRef.current = null;
+    const existingRoom = rooms.find((r) => r.id === roomId);
+    const newRooms = existingRoom
+      ? rooms.map((r) => r.id === roomId ? { ...r, roof: roofData } : r)
+      : [...rooms, { id: roomId, roof: roofData }];
+    pushState(withActiveFloor({ rooms: newRooms }), snap);
+  }, [withActiveFloor, rooms, pushState]);
+
+  // ----- Floor: color picker — per room -----
+
+  const handleFloorColorStart = useCallback(() => {
+    snapRef.current = design;
+  }, [design]);
+
+  const handleUpdateRoomFloor = useCallback((roomId, floorColor) => {
+    const existingRoom = rooms.find((r) => r.id === roomId);
+    const newRooms = existingRoom
+      ? rooms.map((r) => r.id === roomId ? { ...r, floorColor } : r)
+      : [...rooms, { id: roomId, floorColor }];
+    setStateOnly(withActiveFloor({ rooms: newRooms }));
+  }, [withActiveFloor, rooms, setStateOnly]);
+
+  const handleCommitRoomFloor = useCallback((roomId, floorColor) => {
+    const snap = snapRef.current;
+    snapRef.current = null;
+    const existingRoom = rooms.find((r) => r.id === roomId);
+    const newRooms = existingRoom
+      ? rooms.map((r) => r.id === roomId ? { ...r, floorColor } : r)
+      : [...rooms, { id: roomId, floorColor }];
+    pushState(withActiveFloor({ rooms: newRooms }), snap);
+  }, [withActiveFloor, rooms, pushState]);
+
+  // ----- Global materials: color pickers (per active floor) -----
+
+  const handleGlobalMatStart = useCallback(() => {
+    snapRef.current = design;
+  }, [design]);
+
+  const handleUpdateMaterials = useCallback((patch) => {
+    setStateOnly(withActiveFloor({ materials: { ...materials, ...patch } }));
+  }, [withActiveFloor, materials, setStateOnly]);
+
+  const handleCommitMaterials = useCallback((patch) => {
+    const snap = snapRef.current;
+    snapRef.current = null;
+    pushState(withActiveFloor({ materials: { ...materials, ...patch } }), snap);
+  }, [withActiveFloor, materials, pushState]);
+
+  // ----- Door: slide along wall -----
+
+  const handleDoorMoveStart = useCallback(() => {
+    snapRef.current = design;
+  }, [design]);
+
   const handleMoveDoor = useCallback((doorId, newPosition) => {
-    pushState({
-      ...design,
-      doors: design.doors.map((d) =>
-        d.id === doorId ? { ...d, position: newPosition } : d,
-      ),
-    });
-  }, [design, pushState]);
+    setStateOnly(withActiveFloor({
+      doors: doors.map((d) => d.id === doorId ? { ...d, position: newPosition } : d),
+    }));
+  }, [withActiveFloor, doors, setStateOnly]);
 
-  /** Slide a window along its wall */
+  const handleCommitMoveDoor = useCallback((doorId, newPosition) => {
+    const snap = snapRef.current;
+    snapRef.current = null;
+    pushState(withActiveFloor({
+      doors: doors.map((d) => d.id === doorId ? { ...d, position: newPosition } : d),
+    }), snap);
+  }, [withActiveFloor, doors, pushState]);
+
+  // ----- Window: slide along wall -----
+
+  const handleWindowMoveStart = useCallback(() => {
+    snapRef.current = design;
+  }, [design]);
+
   const handleMoveWindow = useCallback((windowId, newPosition) => {
-    pushState({
-      ...design,
-      windows: design.windows.map((w) =>
-        w.id === windowId ? { ...w, position: newPosition } : w,
-      ),
-    });
-  }, [design, pushState]);
+    setStateOnly(withActiveFloor({
+      windows: windows.map((w) => w.id === windowId ? { ...w, position: newPosition } : w),
+    }));
+  }, [withActiveFloor, windows, setStateOnly]);
 
-  /** Move a wall endpoint, rescaling door AND window positions
-   *  proportionally so they remain within the new wall length. */
+  const handleCommitMoveWindow = useCallback((windowId, newPosition) => {
+    const snap = snapRef.current;
+    snapRef.current = null;
+    pushState(withActiveFloor({
+      windows: windows.map((w) => w.id === windowId ? { ...w, position: newPosition } : w),
+    }), snap);
+  }, [withActiveFloor, windows, pushState]);
+
+  // ----- Wall endpoint drag -----
+
+  const handleEndpointStart = useCallback(() => {
+    snapRef.current = design;
+  }, [design]);
+
   const handleMoveWallEndpoint = useCallback((wallId, whichEnd, newCoords) => {
-    const oldWall = design.walls.find((w) => w.id === wallId);
+    const oldWall = walls.find((w) => w.id === wallId);
     if (!oldWall) return;
-
-    const oldLen = Math.hypot(
-      oldWall.end.x - oldWall.start.x,
-      oldWall.end.y - oldWall.start.y,
-    );
-
+    const oldLen = Math.hypot(oldWall.end.x - oldWall.start.x, oldWall.end.y - oldWall.start.y);
     const newWall = { ...oldWall };
     if (whichEnd === 'start') newWall.start = { ...newCoords };
     else newWall.end = { ...newCoords };
-
-    const newLen = Math.hypot(
-      newWall.end.x - newWall.start.x,
-      newWall.end.y - newWall.start.y,
-    );
-
+    const newLen = Math.hypot(newWall.end.x - newWall.start.x, newWall.end.y - newWall.start.y);
     const scaleFactor = newLen > 0 && oldLen > 0 ? oldLen / newLen : 1;
-
-    // Helper — rescale an opening's t-position and clamp
     function rescale(item) {
       if (item.wallId !== wallId) return item;
       let newT = item.position * scaleFactor;
@@ -263,14 +561,37 @@ function App() {
       newT = Math.max(halfW, Math.min(1 - halfW, newT));
       return { ...item, position: newT };
     }
+    setStateOnly(withActiveFloor({
+      walls: walls.map((w) => w.id === wallId ? newWall : w),
+      doors: doors.map(rescale),
+      windows: windows.map(rescale),
+    }));
+  }, [withActiveFloor, walls, doors, windows, setStateOnly]);
 
-    pushState({
-      ...design,
-      walls: design.walls.map((w) => (w.id === wallId ? newWall : w)),
-      doors: design.doors.map(rescale),
-      windows: design.windows.map(rescale),
-    });
-  }, [design, pushState]);
+  const handleCommitWallEndpoint = useCallback((wallId, whichEnd, newCoords) => {
+    const snap = snapRef.current;
+    snapRef.current = null;
+    const oldWall = walls.find((w) => w.id === wallId);
+    if (!oldWall) return;
+    const oldLen = Math.hypot(oldWall.end.x - oldWall.start.x, oldWall.end.y - oldWall.start.y);
+    const newWall = { ...oldWall };
+    if (whichEnd === 'start') newWall.start = { ...newCoords };
+    else newWall.end = { ...newCoords };
+    const newLen = Math.hypot(newWall.end.x - newWall.start.x, newWall.end.y - newWall.start.y);
+    const scaleFactor = newLen > 0 && oldLen > 0 ? oldLen / newLen : 1;
+    function rescale(item) {
+      if (item.wallId !== wallId) return item;
+      let newT = item.position * scaleFactor;
+      const halfW = (item.width / 2) / (newLen || 1);
+      newT = Math.max(halfW, Math.min(1 - halfW, newT));
+      return { ...item, position: newT };
+    }
+    pushState(withActiveFloor({
+      walls: walls.map((w) => w.id === wallId ? newWall : w),
+      doors: doors.map(rescale),
+      windows: windows.map(rescale),
+    }), snap);
+  }, [withActiveFloor, walls, doors, windows, pushState]);
 
   // -----------------------------------------------------------------------
   // Keyboard shortcuts
@@ -290,11 +611,29 @@ function App() {
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
         e.preventDefault();
         handleDeleteSelected();
+        return;
+      }
+      // R — rotate selected furniture 15° clockwise
+      if (e.key === 'r' || e.key === 'R') {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+        if (selectedId && furniture.some((f) => f.id === selectedId)) {
+          e.preventDefault();
+          handleRotateFurniture(selectedId);
+        }
       }
     }
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [undo, redo, handleDeleteSelected]);
+  }, [undo, redo, handleDeleteSelected, handleRotateFurniture, selectedId, furniture]);
+
+  // -----------------------------------------------------------------------
+  // Precompute floor base Ys for 3D stacking (for View3D)
+  // -----------------------------------------------------------------------
+  const floors = design?.floors || [];
+  const floorBaseYs = useMemo(
+    () => floors.map((_, i) => getFloorBaseY(floors, i)),
+    [floors]
+  );
 
   // -----------------------------------------------------------------------
   // Render
@@ -313,24 +652,57 @@ function App() {
 
       <Toolbar mode={mode} onModeChange={setMode} />
 
+      {/* Floor selector bar */}
+      <FloorBar
+        floors={floors}
+        activeFloorId={activeFloorId}
+        showAllFloors={showAllFloors}
+        onSelectFloor={setActiveFloorId}
+        onAddFloor={handleAddFloor}
+        onDeleteFloor={handleDeleteFloor}
+        onToggleShowAll={() => setShowAllFloors((prev) => !prev)}
+      />
+
       <main className="main-content">
-        {/* LEFT — 2D canvas */}
+        {/* LEFT — 2D canvas (always shows active floor only) */}
         <div className="panel panel-left">
           <Canvas2D
-            walls={design.walls}
-            doors={design.doors}
-            windows={design.windows}
+            walls={walls}
+            doors={doors}
+            windows={windows}
             closedLoops={closedLoops}
             materials={materials}
+            furniture={furniture}
+            selectedFurnitureType={selectedFurnitureType}
+            snapRotation={snapRotation}
             mode={mode}
             selectedId={selectedId}
             onAddWall={handleAddWall}
             onAddDoor={handleAddDoor}
             onAddWindow={handleAddWindow}
+            onAddFurniture={handleAddFurniture}
             onSelect={handleSelect}
+            // Door move — live/commit
+            onDoorMoveStart={handleDoorMoveStart}
             onMoveDoor={handleMoveDoor}
+            onCommitMoveDoor={handleCommitMoveDoor}
+            // Window move — live/commit
+            onWindowMoveStart={handleWindowMoveStart}
             onMoveWindow={handleMoveWindow}
+            onCommitMoveWindow={handleCommitMoveWindow}
+            // Wall endpoint drag — live/commit
+            onEndpointStart={handleEndpointStart}
             onMoveWallEndpoint={handleMoveWallEndpoint}
+            onCommitWallEndpoint={handleCommitWallEndpoint}
+            // Furniture move — live/commit
+            onFurnMoveStart={handleFurnMoveStart}
+            onMoveFurniture={handleMoveFurniture}
+            onCommitMoveFurniture={handleCommitMoveFurniture}
+            // Furniture rotate handle (2D) — live/commit
+            onFurnRotateStart={handleFurnRotateStart}
+            onSetFurnitureRotation={handleSetFurnitureRotation}
+            onCommitFurnitureRotation={handleCommitFurnitureRotation}
+            // Misc
             onToggleDoor={handleToggleDoor}
           />
         </div>
@@ -338,28 +710,81 @@ function App() {
         {/* RIGHT — live 3D viewport */}
         <div className="panel panel-right">
           <View3D
-            walls={design.walls}
-            doors={design.doors}
-            windows={design.windows}
-            rooms={design.rooms || []}
+            // Active floor (for single-floor editing)
+            walls={walls}
+            doors={doors}
+            windows={windows}
+            rooms={rooms}
             closedLoops={closedLoops}
             materials={materials}
+            furniture={furniture}
+            // Multi-floor
+            allFloors={floors}
+            activeFloorId={activeFloorId}
+            floorBaseYs={floorBaseYs}
+            showAllFloors={showAllFloors}
+            // UI state
             selectedId={selectedId}
             mode={mode}
+            snapRotation={snapRotation}
             onSelect={handleSelect}
             onToggleDoor={handleToggleDoor}
+            // Furniture rotate handle (3D) — live/commit
+            onFurnRotateStart={handleFurnRotateStart}
+            onSetFurnitureRotation={handleSetFurnitureRotation}
+            onCommitFurnitureRotation={handleCommitFurnitureRotation}
           />
         </div>
 
-        {/* SIDEBAR — Structure & Roof settings + Materials */}
+        {/* SIDEBAR */}
         <Sidebar
           selectedId={selectedId}
+          walls={walls}
           closedLoops={closedLoops}
-          rooms={design.rooms || []}
+          rooms={rooms}
           materials={materials}
+          furniture={furniture}
+          selectedFurnitureType={selectedFurnitureType}
+          snapRotation={snapRotation}
+          mode={mode}
+          // Discrete callbacks (no snapshot needed)
           onUpdateRoomRoof={handleUpdateRoomRoof}
-          onUpdateMaterials={handleUpdateMaterials}
+          onApplyWallMaterialToAll={handleApplyWallMaterialToAll}
+          onApplyRoofMaterialToAll={handleApplyRoofMaterialToAll}
+          onSelectFurnitureType={handleSelectFurnitureType}
+          // Wall material — live/commit
+          onWallMatStart={handleWallMatStart}
+          onUpdateWallMaterial={handleUpdateWallMaterial}
+          onCommitWallMaterial={handleCommitWallMaterial}
+          // Wall dimensions — live/commit
+          onWallDimStart={handleWallDimStart}
+          onUpdateWallDimensions={handleUpdateWallDimensions}
+          onCommitWallDimensions={handleCommitWallDimensions}
+          // Roof material — live/commit
+          onRoofMatStart={handleRoofMatStart}
+          onUpdateRoomRoofMaterial={handleUpdateRoomRoofMaterial}
+          onCommitRoofMaterial={handleCommitRoofMaterial}
+          // Roof height — live/commit
+          onRoofHeightStart={handleRoofHeightStart}
+          onUpdateRoomRoofHeight={handleUpdateRoomRoofHeight}
+          onCommitRoofHeight={handleCommitRoofHeight}
+          // Floor color — live/commit
+          onFloorColorStart={handleFloorColorStart}
           onUpdateRoomFloor={handleUpdateRoomFloor}
+          onCommitRoomFloor={handleCommitRoomFloor}
+          // Global materials — live/commit
+          onGlobalMatStart={handleGlobalMatStart}
+          onUpdateMaterials={handleUpdateMaterials}
+          onCommitMaterials={handleCommitMaterials}
+          // Furniture — live/commit
+          onFurnColorStart={handleFurnColorStart}
+          onUpdateFurnitureColor={handleUpdateFurnitureColor}
+          onCommitFurnitureColor={handleCommitFurnitureColor}
+          onFurnScaleStart={handleFurnScaleStart}
+          onUpdateFurnitureScale={handleUpdateFurnitureScale}
+          onCommitFurnitureScale={handleCommitFurnitureScale}
+          // Misc
+          onToggleSnapRotation={() => setSnapRotation((prev) => !prev)}
           isOpen={sidebarOpen}
           onToggleOpen={() => setSidebarOpen((prev) => !prev)}
         />

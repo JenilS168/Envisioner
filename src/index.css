@@ -181,6 +181,125 @@ body {
   margin: 0 4px;
 }
 
+/* ---- Floor Bar ---- */
+.floor-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--panel-border);
+  z-index: 8;
+  min-height: 42px;
+  flex-shrink: 0;
+}
+
+.floor-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.floor-tabs::-webkit-scrollbar { display: none; }
+
+.floor-bar-icon {
+  color: var(--text-muted);
+  flex-shrink: 0;
+  margin-right: 4px;
+}
+
+.floor-tab {
+  padding: 4px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--panel-border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-family: 'Inter', sans-serif;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.floor-tab:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-main);
+}
+
+.floor-tab-active {
+  background: rgba(59, 130, 246, 0.2) !important;
+  color: #93c5fd !important;
+  border-color: #3b82f6 !important;
+}
+
+.floor-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.floor-bar-btn {
+  font-size: 0.78rem;
+  padding: 4px 10px;
+  gap: 4px;
+  border-radius: 6px;
+}
+
+.floor-bar-btn-active {
+  background: rgba(167, 139, 250, 0.2) !important;
+  color: #c4b5fd !important;
+  border-color: #7c3aed !important;
+}
+
+/* ---- Extra button variants ---- */
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 0.78rem;
+  gap: 4px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-muted);
+  border: 1px solid var(--panel-border);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  font-family: 'Inter', sans-serif;
+  font-weight: 500;
+  transition: all 0.15s ease;
+}
+
+.btn-sm:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--text-main);
+}
+
+.btn-sm.btn-danger {
+  background: rgba(239, 68, 68, 0.08);
+  color: #f87171;
+  border-color: rgba(239, 68, 68, 0.25);
+}
+
+.btn-sm.btn-danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.18);
+}
+
+.btn-primary {
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--accent-hover);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: rgba(59, 130, 246, 0.25);
+}
+
+
 /* ---- Sidebar ---- */
 .sidebar {
   width: 300px;
@@ -495,3 +614,111 @@ body {
 .btn-primary:hover:not(:disabled) {
   background: rgba(59, 130, 246, 0.25);
 }
+
+/* ---- Secondary button ---- */
+.btn-secondary {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-muted);
+  border: 1px solid var(--panel-border);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-main);
+}
+
+/* ---- Apply-to-all button (full width, small) ---- */
+.apply-all-btn {
+  width: 100%;
+  margin-top: 4px;
+  font-size: 0.8rem;
+  padding: 6px 12px;
+  justify-content: center;
+}
+
+/* ---- Context hint card (icon + text row) ---- */
+.context-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.context-hint p {
+  line-height: 1.4;
+}
+
+/* ---- Subsection label (lighter than section-title) ---- */
+.subsection-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin-bottom: 4px;
+  opacity: 0.8;
+}
+
+/* ---- Furniture catalog ---- */
+.furniture-catalog {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 0.75rem;
+}
+
+.furniture-catalog-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: var(--text-main);
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+  text-align: left;
+}
+
+.furniture-catalog-btn:hover {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.22);
+  transform: translateY(-1px);
+}
+
+.furniture-catalog-btn-active {
+  background: rgba(59, 130, 246, 0.22) !important;
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.35);
+}
+
+.furniture-color-chip {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.furniture-catalog-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- kbd shortcut tag ---- */
+kbd {
+  display: inline-block;
+  padding: 1px 5px;
+  font-size: 0.72rem;
+  font-family: 'Inter', monospace;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  color: var(--text-main);
+  line-height: 1.4;
+}
+
