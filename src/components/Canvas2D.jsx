@@ -6,6 +6,7 @@ import {
   furnitureCorners,
   furnitureCornersAt,
   checkFurnitureOverlap,
+  checkFurnitureWallOverlap,
 } from '../utils/furniture';
 
 // ---------------------------------------------------------------------------
@@ -70,6 +71,10 @@ export default function Canvas2D({
   snapRotation = true,
   mode,
   selectedId,
+  // Below-floor reference (for upper floors only)
+  belowFloorWalls  = [],
+  belowFloorLoops  = [],
+  isGroundFloor    = true,
   onAddWall,
   onAddDoor,
   onAddWindow,
@@ -124,9 +129,12 @@ export default function Canvas2D({
 
   // ---------------------------------------------------------------------------
   // Overlap detection (visual warning — no blocking)
+  //   - Furniture vs furniture (same room)
+  //   - Furniture vs walls on this floor
   // ---------------------------------------------------------------------------
   const overlappingIds = useMemo(() => {
     const ids = new Set();
+    // Furniture-to-furniture
     for (let i = 0; i < furniture.length; i++) {
       for (let j = i + 1; j < furniture.length; j++) {
         if (
@@ -138,8 +146,47 @@ export default function Canvas2D({
         }
       }
     }
+    // Furniture-to-wall
+    for (const item of furniture) {
+      for (const wall of walls) {
+        if (checkFurnitureWallOverlap(item, wall)) {
+          ids.add(item.id);
+          break; // one wall collision is enough to mark this item
+        }
+      }
+    }
     return ids;
-  }, [furniture]);
+  }, [furniture, walls]);
+
+  // ---------------------------------------------------------------------------
+  // Unsupported-wall detection (upper floors only, visual warning — no blocking)
+  // Samples 12 evenly-spaced points along the wall centreline and checks what
+  // fraction of them lie inside any closed room polygon on the floor below.
+  // A wall is only flagged if MORE THAN 50% of its length is unsupported,
+  // so partial overhangs and cantilevers do NOT trigger the warning.
+  // ---------------------------------------------------------------------------
+  const SUPPORT_SAMPLES   = 12;  // number of sample points along wall length
+  const SUPPORT_THRESHOLD = 0.5; // fraction of unsupported samples needed to warn
+
+  const unsupportedWallIds = useMemo(() => {
+    if (isGroundFloor || belowFloorLoops.length === 0) return new Set();
+    const ids = new Set();
+    for (const wall of walls) {
+      let unsupportedCount = 0;
+      for (let k = 0; k <= SUPPORT_SAMPLES; k++) {
+        const t = k / SUPPORT_SAMPLES;
+        const px = wall.start.x + t * (wall.end.x - wall.start.x);
+        const py = wall.start.y + t * (wall.end.y - wall.start.y);
+        const supported = belowFloorLoops.some((loop) =>
+          pointInPolygon({ x: px, y: py }, loop.points)
+        );
+        if (!supported) unsupportedCount++;
+      }
+      const unsupportedFraction = unsupportedCount / (SUPPORT_SAMPLES + 1);
+      if (unsupportedFraction > SUPPORT_THRESHOLD) ids.add(wall.id);
+    }
+    return ids;
+  }, [walls, belowFloorLoops, isGroundFloor]);
 
   // ---------------------------------------------------------------------------
   // Coordinate helpers
@@ -683,6 +730,21 @@ export default function Canvas2D({
       style={{ touchAction: 'none', cursor: cursorStyle }}>
       <svg width="100%" height="100%" style={{ display: 'block' }}>
 
+        {/* ---- Below-floor reference guide (non-interactive, faded grey dashes) ---- */}
+        {!isGroundFloor && belowFloorWalls.map((wall) => (
+          <line
+            key={`ref-${wall.id}`}
+            x1={wall.start.x * SCALE} y1={wall.start.y * SCALE}
+            x2={wall.end.x   * SCALE} y2={wall.end.y   * SCALE}
+            stroke="#94a3b8"
+            strokeWidth={Math.max(1.5, (wall.thickness ?? 0.2) * SCALE * 0.5)}
+            strokeLinecap="round"
+            strokeDasharray="6 5"
+            opacity={0.35}
+            style={{ pointerEvents: 'none' }}
+          />
+        ))}
+
         {/* Room fills */}
         {closedLoops.map((loop) => (
           <polygon key={loop.id}
@@ -701,13 +763,30 @@ export default function Canvas2D({
         {walls.map((wall) => {
           const isSel = wall.id === selectedId;
           const isHov = wall.id === hoveredWallId;
+          const isUnsupported = unsupportedWallIds.has(wall.id);
           const baseColor = wall.material?.color || materials.wallColor || '#3b82f6';
           const stroke = isSel ? '#22c55e' : isHov ? '#f59e0b' : baseColor;
           return (
-            <line key={wall.id}
-              x1={wall.start.x * SCALE} y1={wall.start.y * SCALE}
-              x2={wall.end.x   * SCALE} y2={wall.end.y   * SCALE}
-              stroke={stroke} strokeWidth={wall.thickness * SCALE} strokeLinecap="round" />
+            <React.Fragment key={wall.id}>
+              {/* Unsupported-wall warning outline — drawn behind the wall line */}
+              {isUnsupported && (
+                <line
+                  x1={wall.start.x * SCALE} y1={wall.start.y * SCALE}
+                  x2={wall.end.x   * SCALE} y2={wall.end.y   * SCALE}
+                  stroke="#f97316"
+                  strokeWidth={(wall.thickness ?? 0.2) * SCALE + 6}
+                  strokeLinecap="round"
+                  strokeDasharray="7 4"
+                  opacity={0.7}
+                  style={{ pointerEvents: 'none' }}
+                />
+              )}
+              <line
+                x1={wall.start.x * SCALE} y1={wall.start.y * SCALE}
+                x2={wall.end.x   * SCALE} y2={wall.end.y   * SCALE}
+                stroke={stroke} strokeWidth={(wall.thickness ?? 0.2) * SCALE} strokeLinecap="round"
+              />
+            </React.Fragment>
           );
         })}
 

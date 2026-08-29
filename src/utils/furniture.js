@@ -126,7 +126,7 @@ export function furnitureCornersAt(cx, cy, rotation, scale, type) {
 }
 
 // ---------------------------------------------------------------------------
-// Furniture-to-furniture collision — Separating Axis Theorem on OBBs
+// Generic SAT (Separating Axis Theorem) on convex polygons
 // ---------------------------------------------------------------------------
 
 /** Returns the 4 edge-normal axes of a convex polygon (for SAT). */
@@ -150,22 +150,76 @@ function projectPolygon(corners, axis) {
 }
 
 /**
- * Returns true if the two furniture items' oriented bounding boxes overlap.
- * Uses the Separating Axis Theorem on their rotated corners.
- * A return value of false means at least one separating axis was found.
+ * Generic SAT overlap test between two convex polygons.
+ * @param {Array<{x:number, y:number}>} cornersA
+ * @param {Array<{x:number, y:number}>} cornersB
+ * @returns {boolean} true if overlapping
+ */
+export function checkPolygonOverlap(cornersA, cornersB) {
+  for (const axis of [...getEdgeAxes(cornersA), ...getEdgeAxes(cornersB)]) {
+    const pA = projectPolygon(cornersA, axis);
+    const pB = projectPolygon(cornersB, axis);
+    if (pA.max < pB.min || pB.max < pA.min) return false; // gap found
+  }
+  return true; // no separating axis → shapes overlap
+}
+
+// ---------------------------------------------------------------------------
+// Furniture-to-furniture collision
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true if two furniture items' oriented bounding boxes overlap.
+ * Delegates to the generic SAT check.
  *
  * @param {object} item1
  * @param {object} item2
  * @returns {boolean}
  */
 export function checkFurnitureOverlap(item1, item2) {
-  const c1 = furnitureCorners(item1);
-  const c2 = furnitureCorners(item2);
-  // Eight axes total (4 from each rectangle).  All must show overlap for collision.
-  for (const axis of [...getEdgeAxes(c1), ...getEdgeAxes(c2)]) {
-    const p1 = projectPolygon(c1, axis);
-    const p2 = projectPolygon(c2, axis);
-    if (p1.max < p2.min || p2.max < p1.min) return false; // gap found
-  }
-  return true; // no separating axis → shapes overlap
+  return checkPolygonOverlap(furnitureCorners(item1), furnitureCorners(item2));
+}
+
+// ---------------------------------------------------------------------------
+// Wall footprint geometry — 4 corners of a wall's rectangular slab
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the 4 corners of a wall's footprint rectangle in world metres.
+ * The rectangle is the wall's centreline (start→end) expanded by ±thickness/2
+ * perpendicular to the wall direction.
+ *
+ * @param {object} wall — { start: {x,y}, end: {x,y}, thickness? }
+ * @returns {Array<{x:number, y:number}>} four corners
+ */
+export function wallCorners(wall) {
+  const t = (wall.thickness ?? 0.2) / 2;
+  const dx = wall.end.x - wall.start.x;
+  const dy = wall.end.y - wall.start.y;
+  const len = Math.hypot(dx, dy);
+  if (len === 0) return [wall.start, wall.start, wall.start, wall.start];
+  // Unit perpendicular vector
+  const px = -dy / len * t;
+  const py =  dx / len * t;
+  return [
+    { x: wall.start.x + px, y: wall.start.y + py },
+    { x: wall.end.x   + px, y: wall.end.y   + py },
+    { x: wall.end.x   - px, y: wall.end.y   - py },
+    { x: wall.start.x - px, y: wall.start.y - py },
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Furniture-to-wall collision
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true if a furniture item's OBB overlaps a wall's footprint rectangle.
+ *
+ * @param {object} item — furniture item
+ * @param {object} wall — wall object
+ * @returns {boolean}
+ */
+export function checkFurnitureWallOverlap(item, wall) {
+  return checkPolygonOverlap(furnitureCorners(item), wallCorners(wall));
 }

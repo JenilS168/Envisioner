@@ -1,9 +1,9 @@
-import React, { useMemo, useRef } from 'react';
-import { Canvas } from '@react-three/fiber';
+import React, { useState, useMemo, useRef, useCallback } from 'react';
+import { Canvas, useThree, useFrame } from '@react-three/fiber';
 import { OrbitControls, Grid } from '@react-three/drei';
 import * as THREE from 'three';
-import { FURNITURE_CATALOG, furnitureFootprint, checkFurnitureOverlap } from '../utils/furniture';
-import { findClosedLoops } from '../utils/geometry';
+import { FURNITURE_CATALOG, furnitureFootprint, checkFurnitureOverlap, checkFurnitureWallOverlap } from '../utils/furniture';
+import { findClosedLoops, computePolygonOverhang, computeSupportFraction } from '../utils/geometry';
 
 
 // ---------------------------------------------------------------------------
@@ -139,7 +139,11 @@ function darkenColor(hex, factor = 0.62) {
 // WallSegment — a single box slab (part of a wall)
 // Memoizes its own texture by (preset, color) so each wall is independent.
 // ---------------------------------------------------------------------------
-function WallSegment({ position, angle, length, height, thickness, isSelected, onClick, wallColor, wallPreset }) {
+function WallSegment({
+  position, angle, length, height, thickness,
+  isSelected, onClick, wallColor, wallPreset,
+  wallOpacity = 1, wallTransparent = false,
+}) {
   if (length <= 0 || height <= 0) return null;
 
   // Memoize texture per unique (preset, color) combo for this segment
@@ -157,6 +161,9 @@ function WallSegment({ position, angle, length, height, thickness, isSelected, o
         color={isSelected ? '#86efac' : wallColor}
         map={!isSelected ? wallTexture : null}
         roughness={0.7}
+        transparent={wallTransparent}
+        opacity={wallOpacity}
+        depthWrite={!wallTransparent}
       />
     </mesh>
   );
@@ -278,7 +285,7 @@ function Window3D({ win, wallStart, wallAngle, wallUx, wallUz, wallLength, wallT
 // ---------------------------------------------------------------------------
 // FlatRoof3D — extruded flat slab over a closed wall loop
 // ---------------------------------------------------------------------------
-function FlatRoof3D({ loop, wallHeight = 3, roofColor, roofPreset }) {
+function FlatRoof3D({ loop, wallHeight = 3, roofColor, roofPreset, hidden = false }) {
   const { points } = loop;
 
   const roofTexture = useMemo(
@@ -303,23 +310,25 @@ function FlatRoof3D({ loop, wallHeight = 3, roofColor, roofPreset }) {
   );
 
   return (
-    <mesh position={[0, wallHeight, 0]} rotation={[-Math.PI / 2, 0, 0]} castShadow receiveShadow>
-      <extrudeGeometry args={[shape, extrudeSettings]} />
-      <meshStandardMaterial
-        color={roofColor}
-        map={roofTexture || null}
-        roughness={0.6}
-        metalness={0.1}
-        side={THREE.DoubleSide}
-      />
-    </mesh>
+    <group visible={!hidden}>
+      <mesh position={[0, wallHeight, 0]} rotation={[-Math.PI / 2, 0, 0]} castShadow receiveShadow>
+        <extrudeGeometry args={[shape, extrudeSettings]} />
+        <meshStandardMaterial
+          color={roofColor}
+          map={roofTexture || null}
+          roughness={0.6}
+          metalness={0.1}
+          side={THREE.DoubleSide}
+        />
+      </mesh>
+    </group>
   );
 }
 
 // ---------------------------------------------------------------------------
 // GableRoof3D — hip-style pitched roof
 // ---------------------------------------------------------------------------
-function GableRoof3D({ loop, wallHeight = 3, roofHeight = 1.5, roofColor, roofPreset }) {
+function GableRoof3D({ loop, wallHeight = 3, roofHeight = 1.5, roofColor, roofPreset, hidden = false }) {
   const { points } = loop;
 
   const roofTexture = useMemo(
@@ -364,7 +373,7 @@ function GableRoof3D({ loop, wallHeight = 3, roofHeight = 1.5, roofColor, roofPr
   }, [points, wallHeight, roofHeight]);
 
   return (
-    <group>
+    <group visible={!hidden}>
       <mesh geometry={roofGeometry} castShadow receiveShadow>
         <meshStandardMaterial
           color={roofColor}
@@ -379,6 +388,101 @@ function GableRoof3D({ loop, wallHeight = 3, roofHeight = 1.5, roofColor, roofPr
 }
 
 // ---------------------------------------------------------------------------
+// CantileverSlab3D — a flat ceiling extension rendered on a lower floor at
+// the same height as that floor's existing ceiling, covering the overhang
+// area where an upper-floor closed structure extends beyond the lower ceiling.
+//
+// `strips`   — array of { x0, y0, x1, y1 } rectangles in plan-space metres,
+//              produced by computePolygonOverhang() in geometry.js.
+// `wallHeight` — Y world position matching the lower floor's ceiling (metres).
+// `isExtreme`  — true when < 30% of the upper footprint is supported; shows
+//              a red-emissive overlay as a structural warning in the 3D view
+//              (the 2D orange-dashed wall warning still fires independently).
+// ---------------------------------------------------------------------------
+function CantileverSlab3D({ strips, wallHeight = 3, roofColor, roofPreset, isExtreme, hidden = false }) {
+  const roofTexture = useMemo(
+    () => makeTexture(roofPreset, roofColor),
+    [roofPreset, roofColor]
+  );
+
+  // Build a single merged BufferGeometry from all overhang strips.
+  // Each strip contributes top-face and bottom-face triangles with explicit
+  // normals so the slab is lit correctly from both above and below.
+  //
+  // Coordinate mapping (matches FlatRoof3D / Floor3D convention):
+  //   plan X → Three.js X  (unchanged)
+  //   plan Y → Three.js Z  (unchanged sign — verified against FlatRoof3D rotation)
+  const slabGeometry = useMemo(() => {
+    if (!strips || strips.length === 0) return null;
+    const THICKNESS = 0.18; // metres — matches FlatRoof3D extrusion depth
+    const positions = [];
+    const normals   = [];
+
+    for (const s of strips) {
+      const { x0, x1, y0, y1 } = s;
+
+      // Top face — winding for +Y normal (CCW from above)
+      positions.push(
+        x0, THICKNESS, y0,  x1, THICKNESS, y1,  x1, THICKNESS, y0,
+        x0, THICKNESS, y0,  x0, THICKNESS, y1,  x1, THICKNESS, y1,
+      );
+      normals.push(
+        0, 1, 0,  0, 1, 0,  0, 1, 0,
+        0, 1, 0,  0, 1, 0,  0, 1, 0,
+      );
+
+      // Bottom face — reversed winding for -Y normal
+      positions.push(
+        x0, 0, y0,  x1, 0, y0,  x1, 0, y1,
+        x0, 0, y0,  x1, 0, y1,  x0, 0, y1,
+      );
+      normals.push(
+        0, -1, 0,  0, -1, 0,  0, -1, 0,
+        0, -1, 0,  0, -1, 0,  0, -1, 0,
+      );
+    }
+
+    if (positions.length === 0) return null;
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geom.setAttribute('normal',   new THREE.Float32BufferAttribute(normals,   3));
+    return geom;
+  }, [strips]);
+
+  if (!slabGeometry) return null;
+
+  return (
+    // Position at the lower floor's ceiling height (same Y as FlatRoof3D)
+    <group position={[0, wallHeight, 0]} visible={!hidden}>
+      {/* Main cantilever slab — same material as the lower floor's ceiling */}
+      <mesh geometry={slabGeometry} castShadow receiveShadow>
+        <meshStandardMaterial
+          color={roofColor}
+          map={roofTexture || null}
+          roughness={0.6}
+          metalness={0.1}
+        />
+      </mesh>
+
+      {/* Extreme-overhang 3D warning: red emissive glow when < 30% supported.
+          The slight Y offset (5 mm) prevents z-fighting with the slab surface. */}
+      {isExtreme && (
+        <mesh geometry={slabGeometry} position={[0, 0.005, 0]}>
+          <meshStandardMaterial
+            color="#ef4444"
+            emissive="#ef4444"
+            emissiveIntensity={0.55}
+            transparent
+            opacity={0.38}
+            depthWrite={false}
+          />
+        </mesh>
+      )}
+    </group>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Wall3D — renders one wall with cutouts for both doors AND windows.
 // Resolves per-wall material (wall.material) with fallback to globals.
 // ---------------------------------------------------------------------------
@@ -386,6 +490,7 @@ function Wall3D({
   wall, wallDoors, wallWindows, isSelected, selectedId,
   onWallClick, onDoorClick, onWindowClick,
   globalMaterials,
+  wallOpacity = 1, wallTransparent = false,
 }) {
   const { start, end, height, thickness } = wall;
 
@@ -465,6 +570,8 @@ function Wall3D({
     isSelected,
     wallColor,
     wallPreset,
+    wallOpacity,
+    wallTransparent,
     onClick: (e) => { e.stopPropagation(); onWallClick && onWallClick(); },
   };
 
@@ -902,6 +1009,13 @@ function FloorScene({
   onCommitFurnitureRotation,
   overlappingFurnIds,
   globalMaterials,
+  // Cantilever ceiling extensions: parts of upper-floor overhangs that need
+  // a supporting slab rendered at this floor's ceiling height.
+  // Each entry: { strips, wallHeight, roofColor, roofPreset, isExtreme }
+  cantileverSlabs = [],
+  // 3D Viewing Controls
+  viewMode = 'normal',   // 'normal' | 'xray' | 'hidden'
+  isAboveActive = false, // true when this floor is above the active floor (all-floors mode)
 }) {
   // Derived closed loops (computed externally and passed in)
   const loops = closedLoops || [];
@@ -909,10 +1023,25 @@ function FloorScene({
   // Opacity modifier for background floors
   const dimOpacity = isActive ? 1 : 0.45;
 
+  // ---------------------------------------------------------------------------
+  // View-mode derived props — only affect the ACTIVE floor.
+  // Inactive floors are always fully rendered (dimmed via dimOpacity).
+  // ---------------------------------------------------------------------------
+  const wallsHidden    = isActive && viewMode === 'hidden';
+  const wallsXray      = isActive && viewMode === 'xray';
+  const roofsHidden    = isActive && (viewMode === 'xray' || viewMode === 'hidden');
+  const wallOpacity    = wallsXray ? 0.28 : 1;
+  const wallTransparent = wallsXray;
+
+  // Floors above the active floor are fully hidden in xray/hidden modes so they
+  // don't block the camera's view down into the active floor's interior.
+  const fullyHide = isAboveActive && viewMode !== 'normal';
+
   return (
-    <group position={[0, baseY, 0]}>
+    <group position={[0, baseY, 0]} visible={!fullyHide}>
       {/* Walls, Doors, Windows */}
-      <group>
+      {/* visible=false removes these from raycasting so furniture clicks pass through in hidden mode */}
+      <group visible={!wallsHidden}>
         {walls.map((wall) => {
           const wd = doors.filter((d) => d.wallId === wall.id);
           const ww = windows.filter((w) => w.wallId === wall.id);
@@ -926,6 +1055,8 @@ function FloorScene({
               isSelected={isSel}
               selectedId={isActive ? selectedId : null}
               globalMaterials={globalMaterials}
+              wallOpacity={wallOpacity}
+              wallTransparent={wallTransparent}
               onWallClick={() => isActive && onWallClick && onWallClick(wall.id)}
               onDoorClick={(id) => isActive && onDoorClick && onDoorClick(id)}
               onWindowClick={(id) => isActive && onWindowClick && onWindowClick(id)}
@@ -958,6 +1089,7 @@ function FloorScene({
                   roofHeight={roof.height || 1.5}
                   roofColor={roofColor}
                   roofPreset={roofPreset}
+                  hidden={roofsHidden}
                 />
               ) : (
                 <FlatRoof3D
@@ -965,6 +1097,7 @@ function FloorScene({
                   wallHeight={3}
                   roofColor={roofColor}
                   roofPreset={roofPreset}
+                  hidden={roofsHidden}
                 />
               )
             )}
@@ -986,8 +1119,107 @@ function FloorScene({
           onRotateCommit={isActive ? onCommitFurnitureRotation : null}
         />
       ))}
+
+      {/* Cantilever ceiling extensions — rendered at this floor's ceiling Y.
+          Generated automatically whenever the upper floor's walls change. */}
+      {cantileverSlabs.map((slab, idx) => (
+        <CantileverSlab3D
+          key={`cantilever-${idx}`}
+          strips={slab.strips}
+          wallHeight={slab.wallHeight}
+          roofColor={slab.roofColor}
+          roofPreset={slab.roofPreset}
+          isExtreme={slab.isExtreme}
+          hidden={roofsHidden}
+        />
+      ))}
     </group>
   );
+}
+
+// ---------------------------------------------------------------------------
+// CameraFocusHelper — lives inside the Canvas so it can call useThree/useFrame.
+// The outer View3D overlay button writes to triggerRef.current() to start the
+// smooth animated transition to frame the active floor.
+// ---------------------------------------------------------------------------
+function CameraFocusHelper({ triggerRef, activeFloorWalls, activeBaseY }) {
+  const { camera } = useThree();
+
+  // Animation state kept in a plain ref — no re-renders needed.
+  const anim = useRef({
+    active:    false,
+    elapsed:   0,
+    duration:  0.42,           // seconds — ~400 ms ease-out
+    startPos:  new THREE.Vector3(),
+    endPos:    new THREE.Vector3(),
+    startLook: new THREE.Vector3(),
+    endLook:   new THREE.Vector3(),
+    controls:  null,           // populated from useFrame state
+  });
+
+  // Expose a stable trigger function via the ref so the overlay button can call
+  // it without needing to be inside Canvas.
+  // Assigning triggerRef.current in the render body is safe because refs are
+  // mutable containers — no React state is changed.
+  triggerRef.current = useCallback(() => {
+    const a = anim.current;
+
+    // Compute bounding box of the active floor walls in plan coordinates.
+    let cx = 0, cz = 0, size = 6;
+    const walls = activeFloorWalls || [];
+    if (walls.length > 0) {
+      let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+      for (const w of walls) {
+        minX = Math.min(minX, w.start.x, w.end.x);
+        maxX = Math.max(maxX, w.start.x, w.end.x);
+        minZ = Math.min(minZ, w.start.y, w.end.y);
+        maxZ = Math.max(maxZ, w.start.y, w.end.y);
+      }
+      cx = (minX + maxX) / 2;
+      cz = (minZ + maxZ) / 2;
+      size = Math.max(maxX - minX, maxZ - minZ, 4);
+    }
+
+    // Angled isometric-ish view: offset from centre at a comfortable angle
+    // so furniture and room layout are easy to read.
+    const dist = size * 1.15;
+    a.endPos.set(cx + dist * 0.55, activeBaseY + dist * 0.85, cz + dist * 1.05);
+    a.endLook.set(cx, activeBaseY + 1.4, cz);
+
+    // Snapshot where the camera is right now
+    a.startPos.copy(camera.position);
+    // controls.target snapshot — grabbed in useFrame once controls are known
+    a.startLook.copy(
+      a.controls?.target ?? new THREE.Vector3(cx, activeBaseY, cz)
+    );
+
+    a.elapsed = 0;
+    a.active = true;
+  }, [activeFloorWalls, activeBaseY, camera]);
+
+  useFrame((state, delta) => {
+    const a = anim.current;
+    // Keep the controls ref up to date every frame (they mount after Canvas)
+    a.controls = state.controls ?? a.controls;
+
+    if (!a.active) return;
+
+    a.elapsed += delta;
+    const t = Math.min(a.elapsed / a.duration, 1);
+    // Cubic ease-out: fast start, gentle finish
+    const e = 1 - Math.pow(1 - t, 3);
+
+    camera.position.lerpVectors(a.startPos, a.endPos, e);
+
+    if (a.controls?.target) {
+      a.controls.target.lerpVectors(a.startLook, a.endLook, e);
+      a.controls.update();
+    }
+
+    if (t >= 1) a.active = false;
+  });
+
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1033,9 +1265,23 @@ export default function View3D({
   // Merge with defaults for backward compatibility
   const globalMaterials = { ...GLOBAL_DEFAULTS, ...materialsProp };
 
-  // Compute which furniture items overlap another item in the same room (active floor only)
+  // ---------------------------------------------------------------------------
+  // 3D Viewing Controls — display-only state, never written to design JSON.
+  // ---------------------------------------------------------------------------
+  const [viewMode, setViewMode] = useState('normal'); // 'normal' | 'xray' | 'hidden'
+  const focusTriggerRef = useRef(null);
+
+  // Determine which floor index is active (for isAboveActive / activeBaseY)
+  const activeFloorIdx = allFloors.findIndex((f) => f.id === activeFloorId);
+  const activeBaseY = showAllFloors ? (floorBaseYs[activeFloorIdx] ?? 0) : 0;
+  const activeWalls = showAllFloors
+    ? (allFloors[activeFloorIdx]?.walls || walls)
+    : walls;
+
+  // Compute which furniture items overlap another item in the same room OR any wall (active floor only)
   const overlappingFurnIds = useMemo(() => {
     const ids = new Set();
+    // Furniture-to-furniture
     for (let i = 0; i < furniture.length; i++) {
       for (let j = i + 1; j < furniture.length; j++) {
         if (
@@ -1047,13 +1293,86 @@ export default function View3D({
         }
       }
     }
+    // Furniture-to-wall
+    for (const item of furniture) {
+      if (ids.has(item.id)) continue; // already flagged
+      for (const wall of walls) {
+        if (checkFurnitureWallOverlap(item, wall)) {
+          ids.add(item.id);
+          break;
+        }
+      }
+    }
     return ids;
-  }, [furniture]);
+  }, [furniture, walls]);
 
   // Pre-compute closed loops for all floors when showing all
   const allFloorLoops = useMemo(() => {
     if (!showAllFloors) return [];
     return allFloors.map((floor) => findClosedLoops(floor.walls || []));
+  }, [showAllFloors, allFloors]);
+
+  // ---------------------------------------------------------------------------
+  // Cantilever slab data — keyed by lower-floor index.
+  //
+  // For each adjacent floor pair (lowerIdx, upperIdx=lowerIdx+1) we find which
+  // upper closed loops overhang the lower floor's ceiling polygon, compute the
+  // difference strips via computePolygonOverhang(), and package material/height
+  // info so FloorScene can render the extending slab without extra props.
+  //
+  // Re-runs automatically whenever allFloors changes (i.e. any wall edit on any
+  // floor), fulfilling the "live update" requirement.
+  // ---------------------------------------------------------------------------
+  const cantileverSlabsByFloor = useMemo(() => {
+    if (!showAllFloors || allFloors.length < 2) return {};
+
+    // Compute loops for every floor (self-contained so this memo is independent)
+    const loopsPerFloor = allFloors.map((f) => findClosedLoops(f.walls || []));
+    const result = {};
+
+    for (let upperIdx = 1; upperIdx < allFloors.length; upperIdx++) {
+      const lowerIdx   = upperIdx - 1;
+      const upperLoops = loopsPerFloor[upperIdx] || [];
+      const lowerLoops = loopsPerFloor[lowerIdx] || [];
+
+      // Need both floors to have closed structures for an overhang to exist
+      if (!upperLoops.length || !lowerLoops.length) continue;
+
+      const slabs = [];
+
+      for (const upperLoop of upperLoops) {
+        // Overhang strips: parts of this upper loop outside all lower ceilings
+        const strips = computePolygonOverhang(upperLoop.points, lowerLoops);
+        if (!strips.length) continue; // fully within lower ceiling — nothing to extend
+
+        // Support fraction: how much of the upper area is actually over the lower ceiling.
+        // < 30% → extreme overhang → show red 3D warning in addition to 2D orange dashes.
+        const supportFraction = computeSupportFraction(upperLoop.points, lowerLoops);
+        const isExtreme = supportFraction < 0.30;
+
+        // Ceiling height for the lower floor (matches getFloorBaseY logic)
+        const lowerWalls  = allFloors[lowerIdx].walls || [];
+        const wallHeight  = lowerWalls.length > 0
+          ? Math.max(...lowerWalls.map((w) => w.height ?? 3))
+          : 3;
+
+        // Material: use the lower floor's roof colour/preset so the slab looks
+        // like a seamless extension of the existing ceiling.
+        const lowerMats = { ...GLOBAL_DEFAULTS, ...(allFloors[lowerIdx].materials || {}) };
+
+        slabs.push({
+          strips,
+          isExtreme,
+          wallHeight,
+          roofColor:  lowerMats.roofColor,
+          roofPreset: lowerMats.roofPreset,
+        });
+      }
+
+      if (slabs.length) result[lowerIdx] = slabs;
+    }
+
+    return result;
   }, [showAllFloors, allFloors]);
 
   function handleRoomClick(roomId) {
@@ -1077,7 +1396,45 @@ export default function View3D({
   }
 
   return (
-    <div style={{ width: '100%', height: '100%' }}>
+    <div style={{ width: '100%', height: '100%', position: 'relative' }}>
+
+      {/* ---- 3D Viewing Controls overlay ---- */}
+      <div className="view3d-overlay">
+        {/* Segmented mode control */}
+        <div className="view3d-seg-control">
+          <button
+            className={`view3d-seg-btn${viewMode === 'normal' ? ' active' : ''}`}
+            onClick={() => setViewMode('normal')}
+            title="Normal View — fully opaque walls and roofs"
+          >
+            Normal
+          </button>
+          <button
+            className={`view3d-seg-btn${viewMode === 'xray' ? ' active' : ''}`}
+            onClick={() => setViewMode('xray')}
+            title="X-Ray — semi-transparent walls, hidden roofs"
+          >
+            X-Ray
+          </button>
+          <button
+            className={`view3d-seg-btn${viewMode === 'hidden' ? ' active' : ''}`}
+            onClick={() => setViewMode('hidden')}
+            title="Hide Walls — walls and roofs hidden; furniture visible"
+          >
+            Hide Walls
+          </button>
+        </div>
+
+        {/* Focus camera button */}
+        <button
+          className="view3d-focus-btn"
+          onClick={() => focusTriggerRef.current?.()}
+          title="Focus Active Floor — smoothly frame the selected floor"
+        >
+          ⊙ Focus Floor
+        </button>
+      </div>
+
       <Canvas shadows camera={{ position: [0, 10, 15], fov: 50 }}>
         <color attach="background" args={['#0f172a']} />
         <ambientLight intensity={0.5} />
@@ -1090,6 +1447,13 @@ export default function View3D({
         />
         <Grid infiniteGrid fadeDistance={50} sectionColor="#3b82f6" cellColor="#94a3b8" sectionSize={1} cellSize={0.5} />
 
+        {/* Camera focus animation — must be inside Canvas to use useThree/useFrame */}
+        <CameraFocusHelper
+          triggerRef={focusTriggerRef}
+          activeFloorWalls={activeWalls}
+          activeBaseY={activeBaseY}
+        />
+
         {showAllFloors && allFloors.length > 0 ? (
           // ---- Show All Floors: stack every floor at its computed base Y ----
           allFloors.map((floor, idx) => {
@@ -1097,6 +1461,7 @@ export default function View3D({
             const baseY = floorBaseYs[idx] ?? 0;
             const floorLoops = allFloorLoops[idx] || [];
             const floorGlobals = { ...GLOBAL_DEFAULTS, ...(floor.materials || {}) };
+            const isAboveActive = idx > activeFloorIdx;
             return (
               <FloorScene
                 key={floor.id}
@@ -1122,6 +1487,9 @@ export default function View3D({
                 onCommitFurnitureRotation={onCommitFurnitureRotation}
                 overlappingFurnIds={isActive ? overlappingFurnIds : new Set()}
                 globalMaterials={floorGlobals}
+                cantileverSlabs={cantileverSlabsByFloor[idx] || []}
+                viewMode={viewMode}
+                isAboveActive={isAboveActive}
               />
             );
           })
@@ -1150,6 +1518,8 @@ export default function View3D({
             onCommitFurnitureRotation={onCommitFurnitureRotation}
             overlappingFurnIds={overlappingFurnIds}
             globalMaterials={globalMaterials}
+            viewMode={viewMode}
+            isAboveActive={false}
           />
         )}
 

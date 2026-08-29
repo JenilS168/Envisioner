@@ -193,3 +193,110 @@ export function pointInPolygon(point, vs) {
   }
   return inside;
 }
+
+// ---------------------------------------------------------------------------
+// CANTILEVER SUPPORT UTILITIES
+// Used by View3D to compute automatic ceiling extensions when an upper
+// floor's closed structure overhangs the lower floor's ceiling polygon.
+// ---------------------------------------------------------------------------
+
+/**
+ * Computes the fraction [0, 1] of the upper polygon's area that is supported
+ * by (overlaps with) the union of the given lower-floor loop polygons.
+ * Uses a raster grid at `resolutionM` metres for sampling.
+ *
+ * @param {Array<{x,y}>} upperPoints          — vertices of the upper-floor polygon
+ * @param {Array<{points:Array<{x,y}>}>} lowerLoopsList — lower-floor closed loops
+ * @param {number} [resolutionM=0.1]           — grid cell size in metres
+ * @returns {number}  support fraction ∈ [0, 1]; 0 if inputs are invalid
+ */
+export function computeSupportFraction(upperPoints, lowerLoopsList, resolutionM = 0.1) {
+  if (!upperPoints || upperPoints.length < 3) return 0;
+  if (!lowerLoopsList || lowerLoopsList.length === 0) return 0;
+
+  const bounds = computePolygonBounds(upperPoints);
+  const halfStep = resolutionM / 2;
+  let totalCells = 0;
+  let supportedCells = 0;
+
+  for (let cy = bounds.minY + halfStep; cy <= bounds.maxY; cy += resolutionM) {
+    for (let cx = bounds.minX + halfStep; cx <= bounds.maxX; cx += resolutionM) {
+      const pt = { x: cx, y: cy };
+      if (!pointInPolygon(pt, upperPoints)) continue;
+      totalCells++;
+      if (lowerLoopsList.some((loop) => pointInPolygon(pt, loop.points))) {
+        supportedCells++;
+      }
+    }
+  }
+
+  return totalCells > 0 ? supportedCells / totalCells : 0;
+}
+
+/**
+ * Computes the overhang region: parts of the upper polygon that do NOT
+ * overlap any of the lower-floor loop polygons.
+ *
+ * Returns an array of axis-aligned rectangle strips in plan-space metres:
+ * `[{ x0, y0, x1, y1 }]`.  Each strip is a horizontal run of adjacent
+ * overhang grid cells merged together.  Returns an empty array when there
+ * is no overhang, or when inputs are invalid / no lower loops exist.
+ *
+ * The strips are used directly by CantileverSlab3D in View3D.jsx to build
+ * a merged BufferGeometry — no external polygon library required.
+ *
+ * Coordinate note: x0/x1 are plan-space X metres; y0/y1 are plan-space Y
+ * metres.  View3D maps plan Y → Three.js Z directly (same sign), so the
+ * caller uses the values as-is for the Z axis.
+ *
+ * @param {Array<{x,y}>} upperPoints          — vertices of the upper-floor polygon
+ * @param {Array<{points:Array<{x,y}>}>} lowerLoopsList — lower-floor closed loops
+ * @param {number} [resolutionM=0.1]           — grid cell size in metres
+ * @returns {Array<{x0:number, y0:number, x1:number, y1:number}>}
+ */
+export function computePolygonOverhang(upperPoints, lowerLoopsList, resolutionM = 0.1) {
+  if (!upperPoints || upperPoints.length < 3) return [];
+  if (!lowerLoopsList || lowerLoopsList.length === 0) return [];
+
+  const bounds = computePolygonBounds(upperPoints);
+  const halfStep = resolutionM / 2;
+  const strips = [];
+
+  for (let cy = bounds.minY + halfStep; cy <= bounds.maxY; cy += resolutionM) {
+    let stripStartX = null;
+    let lastOverhangX = null;
+
+    for (let cx = bounds.minX + halfStep; cx <= bounds.maxX; cx += resolutionM) {
+      const pt = { x: cx, y: cy };
+      const isOverhang =
+        pointInPolygon(pt, upperPoints) &&
+        !lowerLoopsList.some((loop) => pointInPolygon(pt, loop.points));
+
+      if (isOverhang) {
+        if (stripStartX === null) stripStartX = cx;
+        lastOverhangX = cx;
+      } else if (stripStartX !== null) {
+        strips.push({
+          x0: stripStartX - halfStep,
+          y0: cy - halfStep,
+          x1: lastOverhangX + halfStep,
+          y1: cy + halfStep,
+        });
+        stripStartX = null;
+        lastOverhangX = null;
+      }
+    }
+
+    // Close any open strip at row end
+    if (stripStartX !== null) {
+      strips.push({
+        x0: stripStartX - halfStep,
+        y0: cy - halfStep,
+        x1: lastOverhangX + halfStep,
+        y1: cy + halfStep,
+      });
+    }
+  }
+
+  return strips;
+}

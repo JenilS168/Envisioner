@@ -722,3 +722,83 @@ kbd {
   line-height: 1.4;
 }
 
+/* ---- 3D Viewing Controls overlay ---- */
+.view3d-overlay {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+  pointer-events: none; /* let clicks fall through to Canvas by default */
+}
+
+/* Segmented control pill */
+.view3d-seg-control {
+  display: flex;
+  background: rgba(15, 23, 42, 0.82);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  overflow: hidden;
+  pointer-events: all;
+}
+
+.view3d-seg-btn {
+  padding: 7px 14px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  font-family: 'Inter', sans-serif;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease;
+  white-space: nowrap;
+}
+
+.view3d-seg-btn:not(:last-child) {
+  border-right: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.view3d-seg-btn:hover:not(.active) {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-main);
+}
+
+.view3d-seg-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* Focus Floor button */
+.view3d-focus-btn {
+  padding: 7px 14px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  font-family: 'Inter', sans-serif;
+  color: var(--text-muted);
+  background: rgba(15, 23, 42, 0.82);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+  white-space: nowrap;
+  pointer-events: all;
+}
+
+.view3d-focus-btn:hover {
+  background: rgba(59, 130, 246, 0.18);
+  color: var(--accent-hover);
+  border-color: rgba(59, 130, 246, 0.35);
+}
+
+.view3d-focus-btn:active {
+  background: rgba(59, 130, 246, 0.28);
+}
+

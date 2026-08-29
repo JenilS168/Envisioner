@@ -117,6 +117,21 @@ function App() {
   // Compute closed loops from the active floor's walls
   const closedLoops = useMemo(() => findClosedLoops(walls), [walls]);
 
+  // ---- Below-floor data: the floor directly beneath the active one ----
+  const activeFloorIndex = useMemo(
+    () => (design?.floors || []).findIndex((f) => f.id === activeFloorId),
+    [design, activeFloorId]
+  );
+  const belowFloor = useMemo(
+    () => (activeFloorIndex > 0 ? (design?.floors || [])[activeFloorIndex - 1] : null),
+    [design, activeFloorIndex]
+  );
+  const belowFloorWalls = belowFloor?.walls || [];
+  const belowFloorLoops = useMemo(
+    () => (belowFloor ? findClosedLoops(belowFloor.walls || []) : []),
+    [belowFloor]
+  );
+
   // Materials for the active floor (per-floor, with defaults filled in)
   const materials = useMemo(
     () => ({ ...DEFAULT_MATERIALS, ...(activeFloor?.materials || {}) }),
@@ -136,6 +151,25 @@ function App() {
   /** Add a new empty floor above the current highest. */
   const handleAddFloor = useCallback(() => {
     const floors = design.floors || [];
+
+    // ---- Gate: top floor must have at least one closed structure with a roof ----
+    const topFloor = floors[floors.length - 1];
+    if (topFloor) {
+      const topLoops = findClosedLoops(topFloor.walls || []);
+      const topRooms = topFloor.rooms || [];
+      const hasRoof = topLoops.some((loop) => {
+        const room = topRooms.find((r) => r.id === loop.id);
+        return room?.roof?.enabled === true;
+      });
+      if (!hasRoof) {
+        alert(
+          `Cannot add a new floor: "${topFloor.label}" has no closed structure with a roof/ceiling enabled.\n\n` +
+          'Draw walls to form at least one closed room, then enable a roof on it before building the next floor.'
+        );
+        return;
+      }
+    }
+
     const newIndex = floors.length;
     const label = defaultFloorLabel(newIndex);
     const newFloor = makeEmptyFloor(label);
@@ -677,6 +711,10 @@ function App() {
             snapRotation={snapRotation}
             mode={mode}
             selectedId={selectedId}
+            // Below-floor reference data
+            belowFloorWalls={belowFloorWalls}
+            belowFloorLoops={belowFloorLoops}
+            isGroundFloor={activeFloorIndex <= 0}
             onAddWall={handleAddWall}
             onAddDoor={handleAddDoor}
             onAddWindow={handleAddWindow}
