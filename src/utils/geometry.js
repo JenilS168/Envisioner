@@ -175,18 +175,43 @@ export function findClosedLoops(walls, tolerance = 0.15) {
   return uniqueLoops;
 }
 
+export const GEOMETRY_EPSILON = 1e-6;
+
+function distanceToSegmentSquared(px, py, x1, y1, x2, y2) {
+  const l2 = (x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1);
+  if (l2 === 0) return (px - x1) * (px - x1) + (py - y1) * (py - y1);
+  
+  let t = ((px - x1) * (x2 - x1) + (py - y1) * (y2 - y1)) / l2;
+  t = Math.max(0, Math.min(1, t));
+  
+  const projX = x1 + t * (x2 - x1);
+  const projY = y1 + t * (y2 - y1);
+  return (px - projX) * (px - projX) + (py - projY) * (py - projY);
+}
+
 /**
  * Checks if a 2D point is inside a polygon using ray-casting.
+ * Uses an epsilon tolerance to allow exact boundary touches.
  * @param {object} point {x, y}
  * @param {Array} vs Array of points [{x,y}, ...]
- * @returns {boolean} True if inside
+ * @param {number} epsilon Distance tolerance (default GEOMETRY_EPSILON)
+ * @returns {boolean} True if inside or on boundary
  */
-export function pointInPolygon(point, vs) {
+export function pointInPolygon(point, vs, epsilon = GEOMETRY_EPSILON) {
   let x = point.x, y = point.y;
   let inside = false;
+  const eps2 = epsilon * epsilon;
+
   for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
     let xi = vs[i].x, yi = vs[i].y;
     let xj = vs[j].x, yj = vs[j].y;
+    
+    // 1. Boundary check: If the point is on the segment within epsilon, it's inside
+    if (distanceToSegmentSquared(x, y, xi, yi, xj, yj) <= eps2) {
+      return true;
+    }
+    
+    // 2. Ray-casting check
     let intersect = ((yi > y) !== (yj > y))
         && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
     if (intersect) inside = !inside;

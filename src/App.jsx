@@ -17,6 +17,7 @@ import {
   getFloorBaseY,
   defaultFloorLabel,
 } from './utils/floors';
+import { computeFloorValidations } from './utils/validation';
 import './index.css';
 
 // ---------------------------------------------------------------------------
@@ -61,6 +62,7 @@ function App() {
   const [selectedId, setSelectedId]          = useState(null);
   const [sidebarOpen, setSidebarOpen]        = useState(true);
   const [selectedFurnitureType, setSelectedFurnitureType] = useState('bed');
+  const [selectedStairType, setSelectedStairType] = useState('straight');
   const [snapRotation, setSnapRotation]      = useState(true);
 
   // ---- Interaction snapshots — saved at drag/interaction START ----
@@ -113,6 +115,7 @@ function App() {
   const windows   = activeFloor?.windows   || [];
   const rooms     = activeFloor?.rooms     || [];
   const furniture = activeFloor?.furniture || [];
+  const stairs    = activeFloor?.stairs    || [];
 
   // Compute closed loops from the active floor's walls
   const closedLoops = useMemo(() => findClosedLoops(walls), [walls]);
@@ -182,7 +185,13 @@ function App() {
   const handleDeleteFloor = useCallback((floorId) => {
     const floors = design.floors || [];
     if (floors.length <= 1) return; // prevent deleting last floor
-    const newFloors = floors.filter((f) => f.id !== floorId);
+    const newFloors = floors.filter((f) => f.id !== floorId).map(f => {
+      // Remove any stairs on this floor that went to the deleted floor
+      if (f.stairs) {
+        return { ...f, stairs: f.stairs.filter(s => s.toFloorId !== floorId) };
+      }
+      return f;
+    });
     pushState({ ...design, floors: newFloors });
     // activeFloorId is updated by the useEffect above
   }, [design, pushState]);
@@ -248,6 +257,16 @@ function App() {
     pushState(withActiveFloor({ furniture: [...furniture, item] }));
   }, [withActiveFloor, furniture, pushState]);
 
+  /** Place a new stair */
+  const handleAddStair = useCallback((data) => {
+    const floors = design.floors || [];
+    const activeIndex = floors.findIndex(f => f.id === activeFloorId);
+    if (activeIndex >= floors.length - 1) return; // Topmost check
+    const toFloorId = floors[activeIndex + 1].id;
+    const item = { ...data, id: `stair-${Date.now()}`, fromFloorId: activeFloorId, toFloorId };
+    pushState(withActiveFloor({ stairs: [...stairs, item] }));
+  }, [design, activeFloorId, withActiveFloor, stairs, pushState]);
+
   /** Toggle a door open / closed */
   const handleToggleDoor = useCallback((doorId) => {
     pushState(withActiveFloor({
@@ -263,6 +282,15 @@ function App() {
       ),
     }));
   }, [withActiveFloor, furniture, pushState]);
+
+  /** Rotate a stair by 15° clockwise — keyboard shortcut (R key). */
+  const handleRotateStair = useCallback((id) => {
+    pushState(withActiveFloor({
+      stairs: stairs.map((s) =>
+        s.id === id ? { ...s, rotation: (((s.rotation ?? 0) + 15) % 360 + 360) % 360 } : s
+      ),
+    }));
+  }, [withActiveFloor, stairs, pushState]);
 
   /** Delete whatever is currently selected */
   const handleDeleteSelected = useCallback(() => {
@@ -295,7 +323,12 @@ function App() {
       setSelectedId(null);
       return;
     }
-  }, [selectedId, withActiveFloor, walls, doors, windows, furniture, pushState]);
+    if (stairs.some((s) => s.id === selectedId)) {
+      pushState(withActiveFloor({ stairs: stairs.filter((s) => s.id !== selectedId) }));
+      setSelectedId(null);
+      return;
+    }
+  }, [selectedId, withActiveFloor, walls, doors, windows, furniture, stairs, pushState]);
 
   /** Clear the entire design and history */
   const handleClear = useCallback(() => {
@@ -311,6 +344,12 @@ function App() {
   const handleSelectFurnitureType = useCallback((type) => {
     setSelectedFurnitureType(type);
     setMode('furniture');
+  }, []);
+
+  /** Activate a stair type and switch to stair-placement mode */
+  const handleSelectStairType = useCallback((type) => {
+    setSelectedStairType(type);
+    setMode('stairs');
   }, []);
 
   // -----------------------------------------------------------------------
@@ -400,6 +439,96 @@ function App() {
       furniture: furniture.map((f) => f.id === id ? { ...f, color } : f),
     }), snap);
   }, [withActiveFloor, furniture, pushState]);
+
+  // ----- Stairs: move -----
+
+  const handleStairMoveStart = useCallback(() => {
+    snapRef.current = design;
+  }, [design]);
+
+  const handleMoveStair = useCallback((id, x, y) => {
+    setStateOnly(withActiveFloor({
+      stairs: stairs.map((s) => s.id === id ? { ...s, x, y } : s),
+    }));
+  }, [withActiveFloor, stairs, setStateOnly]);
+
+  const handleCommitMoveStair = useCallback((id, x, y) => {
+    const snap = snapRef.current;
+    snapRef.current = null;
+    pushState(withActiveFloor({
+      stairs: stairs.map((s) => s.id === id ? { ...s, x, y } : s),
+    }), snap);
+  }, [withActiveFloor, stairs, pushState]);
+
+  // ----- Stairs: rotate (drag handle) -----
+
+  const handleStairRotateStart = useCallback(() => {
+    snapRef.current = design;
+  }, [design]);
+
+  const handleSetStairRotation = useCallback((id, degrees) => {
+    const normalized = ((degrees % 360) + 360) % 360;
+    setStateOnly(withActiveFloor({
+      stairs: stairs.map((s) => s.id === id ? { ...s, rotation: normalized } : s),
+    }));
+  }, [withActiveFloor, stairs, setStateOnly]);
+
+  const handleCommitStairRotation = useCallback((id, degrees) => {
+    const snap = snapRef.current;
+    snapRef.current = null;
+    const normalized = ((degrees % 360) + 360) % 360;
+    pushState(withActiveFloor({
+      stairs: stairs.map((s) => s.id === id ? { ...s, rotation: normalized } : s),
+    }), snap);
+  }, [withActiveFloor, stairs, pushState]);
+
+  // ----- Stairs: dimensions sliders -----
+
+  const handleStairDimStart = useCallback(() => {
+    snapRef.current = design;
+  }, [design]);
+
+  const handleUpdateStairDimensions = useCallback((id, patch) => {
+    setStateOnly(withActiveFloor({
+      stairs: stairs.map((s) => s.id === id ? { ...s, ...patch } : s),
+    }));
+  }, [withActiveFloor, stairs, setStateOnly]);
+
+  const handleCommitStairDimensions = useCallback((id, patch) => {
+    const snap = snapRef.current;
+    snapRef.current = null;
+    pushState(withActiveFloor({
+      stairs: stairs.map((s) => s.id === id ? { ...s, ...patch } : s),
+    }), snap);
+  }, [withActiveFloor, stairs, pushState]);
+
+  // ----- Stairs: color picker -----
+
+  const handleStairColorStart = useCallback(() => {
+    snapRef.current = design;
+  }, [design]);
+
+  const handleUpdateStairColor = useCallback((id, color) => {
+    setStateOnly(withActiveFloor({
+      stairs: stairs.map((s) => s.id === id ? { ...s, color } : s),
+    }));
+  }, [withActiveFloor, stairs, setStateOnly]);
+
+  const handleCommitStairColor = useCallback((id, color) => {
+    const snap = snapRef.current;
+    snapRef.current = null;
+    pushState(withActiveFloor({
+      stairs: stairs.map((s) => s.id === id ? { ...s, color } : s),
+    }), snap);
+  }, [withActiveFloor, stairs, pushState]);
+
+  // ----- Stairs: turn direction (discrete) -----
+
+  const handleStairTurnChange = useCallback((id, direction) => {
+    pushState(withActiveFloor({
+      stairs: stairs.map((s) => s.id === id ? { ...s, turnDirection: direction } : s),
+    }));
+  }, [withActiveFloor, stairs, pushState]);
 
   // ----- Wall: material (color picker) -----
 
@@ -647,18 +776,21 @@ function App() {
         handleDeleteSelected();
         return;
       }
-      // R — rotate selected furniture 15° clockwise
+      // R — rotate selected furniture or stair 15° clockwise
       if (e.key === 'r' || e.key === 'R') {
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
         if (selectedId && furniture.some((f) => f.id === selectedId)) {
           e.preventDefault();
           handleRotateFurniture(selectedId);
+        } else if (selectedId && stairs.some((s) => s.id === selectedId)) {
+          e.preventDefault();
+          handleRotateStair(selectedId);
         }
       }
     }
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [undo, redo, handleDeleteSelected, handleRotateFurniture, selectedId, furniture]);
+  }, [undo, redo, handleDeleteSelected, handleRotateFurniture, handleRotateStair, selectedId, furniture, stairs]);
 
   // -----------------------------------------------------------------------
   // Precompute floor base Ys for 3D stacking (for View3D)
@@ -668,6 +800,26 @@ function App() {
     () => floors.map((_, i) => getFloorBaseY(floors, i)),
     [floors]
   );
+  const activeFloorHeight = useMemo(() => {
+    if (activeFloorIndex >= floors.length - 1) return 3;
+    return getFloorBaseY(floors, activeFloorIndex + 1) - getFloorBaseY(floors, activeFloorIndex);
+  }, [floors, activeFloorIndex]);
+
+  // -----------------------------------------------------------------------
+  // Centralized Collision & Support Validation
+  // -----------------------------------------------------------------------
+  const { invalidStairIds, overlappingFurnIds, unsupportedWallIds } = useMemo(() => {
+    return computeFloorValidations({
+      activeFloorId,
+      walls,
+      furniture,
+      stairs,
+      closedLoops,
+      belowFloorLoops,
+      isGroundFloor: activeFloorIndex <= 0,
+      allFloors: floors
+    });
+  }, [activeFloorId, walls, furniture, stairs, closedLoops, belowFloorLoops, activeFloorIndex, floors]);
 
   // -----------------------------------------------------------------------
   // Render
@@ -707,10 +859,15 @@ function App() {
             closedLoops={closedLoops}
             materials={materials}
             furniture={furniture}
+            stairs={stairs}
             selectedFurnitureType={selectedFurnitureType}
+            selectedStairType={selectedStairType}
             snapRotation={snapRotation}
             mode={mode}
             selectedId={selectedId}
+            invalidStairIds={invalidStairIds}
+            overlappingFurnIds={overlappingFurnIds}
+            unsupportedWallIds={unsupportedWallIds}
             // Below-floor reference data
             belowFloorWalls={belowFloorWalls}
             belowFloorLoops={belowFloorLoops}
@@ -740,6 +897,15 @@ function App() {
             onFurnRotateStart={handleFurnRotateStart}
             onSetFurnitureRotation={handleSetFurnitureRotation}
             onCommitFurnitureRotation={handleCommitFurnitureRotation}
+            
+            onAddStair={handleAddStair}
+            onStairMoveStart={handleStairMoveStart}
+            onMoveStair={handleMoveStair}
+            onCommitMoveStair={handleCommitMoveStair}
+            onStairRotateStart={handleStairRotateStart}
+            onSetStairRotation={handleSetStairRotation}
+            onCommitStairRotation={handleCommitStairRotation}
+
             // Misc
             onToggleDoor={handleToggleDoor}
           />
@@ -756,6 +922,10 @@ function App() {
             closedLoops={closedLoops}
             materials={materials}
             furniture={furniture}
+            stairs={stairs}
+            invalidStairIds={invalidStairIds}
+            overlappingFurnIds={overlappingFurnIds}
+            unsupportedWallIds={unsupportedWallIds}
             // Multi-floor
             allFloors={floors}
             activeFloorId={activeFloorId}
@@ -789,7 +959,12 @@ function App() {
           onUpdateRoomRoof={handleUpdateRoomRoof}
           onApplyWallMaterialToAll={handleApplyWallMaterialToAll}
           onApplyRoofMaterialToAll={handleApplyRoofMaterialToAll}
+          selectedFurnitureType={selectedFurnitureType}
           onSelectFurnitureType={handleSelectFurnitureType}
+          
+          selectedStairType={selectedStairType}
+          onSelectStairType={handleSelectStairType}
+
           // Wall material — live/commit
           onWallMatStart={handleWallMatStart}
           onUpdateWallMaterial={handleUpdateWallMaterial}
@@ -821,6 +996,22 @@ function App() {
           onFurnScaleStart={handleFurnScaleStart}
           onUpdateFurnitureScale={handleUpdateFurnitureScale}
           onCommitFurnitureScale={handleCommitFurnitureScale}
+
+          // Stair continuous
+          onStairColorStart={handleStairColorStart}
+          onUpdateStairColor={handleUpdateStairColor}
+          onCommitStairColor={handleCommitStairColor}
+          
+          onStairDimStart={handleStairDimStart}
+          onUpdateStairDimensions={handleUpdateStairDimensions}
+          onCommitStairDimensions={handleCommitStairDimensions}
+          onStairTurnChange={handleStairTurnChange}
+          
+          activeFloorIndex={activeFloorIndex}
+          totalFloors={(design?.floors || []).length}
+          floorHeight={activeFloorHeight}
+          stairs={stairs}
+
           // Misc
           onToggleSnapRotation={() => setSnapRotation((prev) => !prev)}
           isOpen={sidebarOpen}

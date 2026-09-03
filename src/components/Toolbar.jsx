@@ -1,5 +1,5 @@
 import React from 'react';
-import { PenLine, DoorOpen, MousePointer2, SquareStack, Box } from 'lucide-react';
+import { PenLine, DoorOpen, MousePointer2, SquareStack, Box, ListOrdered } from 'lucide-react';
 
 /**
  * Toolbar — lets the user switch between
@@ -69,6 +69,17 @@ export default function Toolbar({ mode, onModeChange }) {
       >
         <Box size={16} />
         Furniture
+      </button>
+
+      {/* Add Stairs mode */}
+      <button
+        id="btn-mode-stairs"
+        className={`btn toolbar-btn ${mode === 'stairs' ? 'toolbar-btn-active' : ''}`}
+        onClick={() => onModeChange('stairs')}
+        title="Place stairs to connect to the floor above"
+      >
+        <ListOrdered size={16} />
+        Stairs
       </button>
     </div>
   );

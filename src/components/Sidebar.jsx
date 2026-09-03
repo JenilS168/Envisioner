@@ -1,9 +1,10 @@
 import React, { useState, useRef } from 'react';
 import {
   Home, Layers, Palette, CheckCircle2, AlertCircle,
-  ChevronRight, ChevronLeft, Square, AlertTriangle, Box,
+  ChevronRight, ChevronLeft, Square, AlertTriangle, Box, ListOrdered,
 } from 'lucide-react';
 import { FURNITURE_CATALOG } from '../utils/furniture';
+import { STAIR_CATALOG, calculateStepCount } from '../utils/stairs';
 
 // ---------------------------------------------------------------------------
 // ColorRow — labeled color input that uses the three-phase commit pattern.
@@ -141,6 +142,7 @@ export default function Sidebar({
   onApplyWallMaterialToAll,
   onApplyRoofMaterialToAll,
   onSelectFurnitureType,
+  onSelectStairType,
 
   // Wall material — live/commit
   onWallMatStart,
@@ -182,12 +184,35 @@ export default function Sidebar({
   onUpdateFurnitureScale,
   onCommitFurnitureScale,
 
+  // Stair properties — live/commit
+  onStairColorStart,
+  onUpdateStairColor,
+  onCommitStairColor,
+
+  onStairDimStart,
+  onUpdateStairDimensions,
+  onCommitStairDimensions,
+
+  onStairTurnChange,
+  
+  // Floor context for stairs
+  activeFloorIndex = 0,
+  totalFloors = 1,
+  floorHeight = 3, // Delta to next floor
+  stairs = [],
+  selectedStairType = 'straight',
+
   // Misc
   onToggleSnapRotation,
   isOpen = true,
   onToggleOpen,
 }) {
   const [activeTab, setActiveTab] = useState('roof');
+
+  React.useEffect(() => {
+    if (mode === 'furniture') setActiveTab('furniture');
+    if (mode === 'stairs') setActiveTab('stairs');
+  }, [mode]);
 
   const hasClosedLoop = closedLoops.length > 0;
 
@@ -196,6 +221,7 @@ export default function Sidebar({
   const selectedLoop      = closedLoops.find(l => l.id === selectedId) || null;
   const selectedRoomData  = rooms.find(r => r.id === selectedId) || null;
   const selectedFurniture = furniture.find(f => f.id === selectedId) || null;
+  const selectedStair     = stairs.find(s => s.id === selectedId) || null;
 
   // Effective roof for the selected structure
   const defaultRoof = { enabled: false, type: 'flat', height: 1.5 };
@@ -259,6 +285,10 @@ export default function Sidebar({
             <button className={`tab-btn ${activeTab === 'furniture' ? 'tab-btn-active' : ''}`}
               onClick={() => setActiveTab('furniture')}>
               <Box size={14} /><span>Furniture</span>
+            </button>
+            <button className={`tab-btn ${activeTab === 'stairs' ? 'tab-btn-active' : ''}`}
+              onClick={() => setActiveTab('stairs')}>
+              <ListOrdered size={14} /><span>Stairs</span>
             </button>
           </div>
 
@@ -672,6 +702,182 @@ export default function Sidebar({
                       style={{ accentColor: '#a78bfa', width: 16, height: 16, cursor: 'pointer' }}
                     />
                     <label htmlFor="snap-rotation-toggle" className="form-label" style={{ marginBottom: 0, cursor: 'pointer' }}>
+                      Snap rotation to 15°
+                    </label>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* ============================================================
+              TAB: Stairs
+          ============================================================ */}
+          {activeTab === 'stairs' && (
+            <div className="sidebar-section">
+              <div className="section-title">
+                <ListOrdered size={16} /><span>Stairs</span>
+              </div>
+
+              {activeFloorIndex >= totalFloors - 1 ? (
+                <div className="info-card status-warning mb-2">
+                  <AlertCircle size={14} style={{ color: 'var(--warning)', flexShrink: 0, marginTop: 2 }} />
+                  <p className="text-sm">
+                    <strong>Cannot place stairs here.</strong><br/>
+                    Add another floor above this floor before placing stairs.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <div className={`status-badge ${mode === 'stairs' ? 'status-success' : 'status-warning'}`}>
+                    {mode === 'stairs' ? (
+                      <><CheckCircle2 size={14} /><span>Click inside a room to place stairs</span></>
+                    ) : (
+                      <><AlertCircle size={14} /><span>Select a type below to start placing</span></>
+                    )}
+                  </div>
+
+                  {/* Catalog */}
+                  <div className="furniture-catalog">
+                    {Object.entries(STAIR_CATALOG).map(([type, cat]) => {
+                      const isActive = mode === 'stairs' && selectedStairType === type;
+                      return (
+                        <button
+                          key={type}
+                          id={`stair-catalog-${type}`}
+                          className={`furniture-catalog-btn ${isActive ? 'furniture-catalog-btn-active' : ''}`}
+                          onClick={() => onSelectStairType && onSelectStairType(type)}
+                          title={`Place ${cat.label} Stairs`}
+                        >
+                          <span className="furniture-color-chip" style={{ background: '#8b6b45' }} />
+                          <span className="furniture-catalog-label">{cat.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="info-card" style={{ marginTop: '0.75rem' }}>
+                    <p className="text-sm text-muted">
+                      In Select mode: drag to move, drag the purple handle for free rotation, <kbd>Del</kbd> to delete.
+                    </p>
+                  </div>
+                </>
+              )}
+
+              {/* Selected Stair Panel */}
+              {selectedStair && (
+                <>
+                  <div className="section-divider" />
+                  <div className="subsection-label">
+                    Selected — {STAIR_CATALOG[selectedStair.type]?.label || selectedStair.type} Stairs
+                  </div>
+                  <div className="info-card mb-2">
+                    <p className="text-sm">
+                      Rotation: <strong>{Math.round(selectedStair.rotation ?? 0)}°</strong>
+                    </p>
+                  </div>
+
+                  {/* Stair Type Change */}
+                  <PresetSelect
+                    label="Shape"
+                    value={selectedStair.type}
+                    onChange={(val) => onCommitStairDimensions && onCommitStairDimensions(selectedStair.id, { type: val })}
+                    options={Object.entries(STAIR_CATALOG).map(([k, v]) => ({ value: k, label: v.label }))}
+                  />
+
+                  {/* Turn Direction (only for L/U) */}
+                  {(selectedStair.type === 'l_shape' || selectedStair.type === 'u_shape') && (
+                    <div className="form-group">
+                      <label className="form-label">Turn Direction</label>
+                      <div style={{ display: 'flex', gap: '0.5rem' }}>
+                        <button
+                          className={`btn ${selectedStair.turnDirection === 'left' ? 'btn-primary' : 'btn-secondary'}`}
+                          style={{ flex: 1, padding: '0.25rem' }}
+                          onClick={() => onStairTurnChange && onStairTurnChange(selectedStair.id, 'left')}
+                        >
+                          Turn Left
+                        </button>
+                        <button
+                          className={`btn ${selectedStair.turnDirection === 'right' ? 'btn-primary' : 'btn-secondary'}`}
+                          style={{ flex: 1, padding: '0.25rem' }}
+                          onClick={() => onStairTurnChange && onStairTurnChange(selectedStair.id, 'right')}
+                        >
+                          Turn Right
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  <ColorRow
+                    label="Color"
+                    value={selectedStair.color || '#8b6b45'}
+                    onSnapshot={() => onStairColorStart && onStairColorStart()}
+                    onChange={(color) => onUpdateStairColor && onUpdateStairColor(selectedStair.id, color)}
+                    onCommit={(color) => onCommitStairColor && onCommitStairColor(selectedStair.id, color)}
+                  />
+
+                  <RangeRow
+                    label="Width"
+                    displayValue={`${(selectedStair.width ?? 1.0).toFixed(2)} m`}
+                    value={selectedStair.width ?? 1.0}
+                    min="0.6" max="2.0" step="0.05"
+                    onSnapshot={() => onStairDimStart && onStairDimStart()}
+                    onChange={(val) => onUpdateStairDimensions && onUpdateStairDimensions(selectedStair.id, { width: parseFloat(val) })}
+                    onCommit={(val) => onCommitStairDimensions && onCommitStairDimensions(selectedStair.id, { width: parseFloat(val) })}
+                    hints={<><span>0.6m</span><span>2.0m</span></>}
+                  />
+
+                  <RangeRow
+                    label="Run"
+                    displayValue={`${(selectedStair.run ?? 3.0).toFixed(2)} m`}
+                    value={selectedStair.run ?? 3.0}
+                    min="1.0" max="6.0" step="0.1"
+                    onSnapshot={() => onStairDimStart && onStairDimStart()}
+                    onChange={(val) => onUpdateStairDimensions && onUpdateStairDimensions(selectedStair.id, { run: parseFloat(val) })}
+                    onCommit={(val) => onCommitStairDimensions && onCommitStairDimensions(selectedStair.id, { run: parseFloat(val) })}
+                    hints={<><span>1.0m</span><span>6.0m</span></>}
+                  />
+
+                  {(selectedStair.type === 'l_shape' || selectedStair.type === 'u_shape') && (
+                    <RangeRow
+                      label="Landing"
+                      displayValue={`${(selectedStair.landingLength ?? 1.0).toFixed(2)} m`}
+                      value={selectedStair.landingLength ?? 1.0}
+                      min="0.5" max="2.0" step="0.05"
+                      onSnapshot={() => onStairDimStart && onStairDimStart()}
+                      onChange={(val) => onUpdateStairDimensions && onUpdateStairDimensions(selectedStair.id, { landingLength: parseFloat(val) })}
+                      onCommit={(val) => onCommitStairDimensions && onCommitStairDimensions(selectedStair.id, { landingLength: parseFloat(val) })}
+                      hints={<><span>0.5m</span><span>2.0m</span></>}
+                    />
+                  )}
+
+                  {/* Step Count and Riser Height info */}
+                  <RangeRow
+                    label="Step Count"
+                    displayValue={`${selectedStair.stepCount ?? calculateStepCount(floorHeight)}`}
+                    value={selectedStair.stepCount ?? calculateStepCount(floorHeight)}
+                    min="10" max="30" step="1"
+                    onSnapshot={() => onStairDimStart && onStairDimStart()}
+                    onChange={(val) => onUpdateStairDimensions && onUpdateStairDimensions(selectedStair.id, { stepCount: parseInt(val, 10) })}
+                    onCommit={(val) => onCommitStairDimensions && onCommitStairDimensions(selectedStair.id, { stepCount: parseInt(val, 10) })}
+                    hints={<><span>10</span><span>30</span></>}
+                  />
+                  <div className="info-card mb-2 mt-1">
+                    <p className="text-sm">
+                      Floor-to-floor: <strong>{floorHeight.toFixed(2)} m</strong><br/>
+                      Calculated Riser: <strong>{((floorHeight * 100) / (selectedStair.stepCount ?? calculateStepCount(floorHeight))).toFixed(1)} cm</strong>
+                    </p>
+                  </div>
+
+                  <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '1rem' }}>
+                    <input
+                      id="snap-rotation-toggle-stairs"
+                      type="checkbox"
+                      checked={snapRotation}
+                      onChange={onToggleSnapRotation}
+                      style={{ accentColor: '#a78bfa', width: 16, height: 16, cursor: 'pointer' }}
+                    />
+                    <label htmlFor="snap-rotation-toggle-stairs" className="form-label" style={{ marginBottom: 0, cursor: 'pointer' }}>
                       Snap rotation to 15°
                     </label>
                   </div>

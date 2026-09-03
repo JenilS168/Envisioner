@@ -48,6 +48,7 @@ export function makeEmptyFloor(label, id) {
     rooms: [],
     materials: { ...DEFAULT_MATERIALS },
     furniture: [],
+    stairs: [],
   };
 }
 
@@ -78,6 +79,7 @@ export function migrateToFloors(oldDesign) {
     rooms:     oldDesign?.rooms     || [],
     materials: oldDesign?.materials ? { ...DEFAULT_MATERIALS, ...oldDesign.materials } : { ...DEFAULT_MATERIALS },
     furniture: oldDesign?.furniture || [],
+    stairs:    oldDesign?.stairs    || [],
   };
 
   return { floors: [groundFloor] };
@@ -96,6 +98,7 @@ function normaliseFloor(floor) {
     rooms:     floor.rooms     || [],
     materials: floor.materials ? { ...DEFAULT_MATERIALS, ...floor.materials } : { ...DEFAULT_MATERIALS },
     furniture: floor.furniture || [],
+    stairs:    floor.stairs    || [],
   };
 }
 

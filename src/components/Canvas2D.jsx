@@ -1,4 +1,4 @@
-import React, { useState, useRef, useMemo } from 'react';
+import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { pointInPolygon } from '../utils/geometry';
 import {
   FURNITURE_CATALOG,
@@ -8,6 +8,14 @@ import {
   checkFurnitureOverlap,
   checkFurnitureWallOverlap,
 } from '../utils/furniture';
+import {
+  STAIR_CATALOG,
+  getStairPolygons,
+  checkStairOverlap,
+  checkStairWallOverlap,
+  checkStairFurnitureOverlap,
+  checkStairInRoom
+} from '../utils/stairs';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -67,10 +75,15 @@ export default function Canvas2D({
   closedLoops  = [],
   materials    = {},
   furniture    = [],
+  stairs       = [],
   selectedFurnitureType = 'bed',
+  selectedStairType = 'straight',
   snapRotation = true,
   mode,
   selectedId,
+  invalidStairIds = new Set(),
+  overlappingFurnIds = new Set(),
+  unsupportedWallIds = new Set(),
   // Below-floor reference (for upper floors only)
   belowFloorWalls  = [],
   belowFloorLoops  = [],
@@ -100,10 +113,30 @@ export default function Canvas2D({
   onFurnRotateStart,
   onSetFurnitureRotation,
   onCommitFurnitureRotation,
+  // Stair move
+  onAddStair,
+  onStairMoveStart,
+  onMoveStair,
+  onCommitMoveStair,
+  // Stair rotate
+  onStairRotateStart,
+  onSetStairRotation,
+  onCommitStairRotation,
   // Misc
   onToggleDoor,
 }) {
   const containerRef = useRef(null);
+
+  useEffect(() => {
+    function handleBlur() {
+      setIsDrawing(false);
+      setStartPoint(null);
+      setCurrentPoint(null);
+      setDragTarget(null);
+    }
+    window.addEventListener('blur', handleBlur);
+    return () => window.removeEventListener('blur', handleBlur);
+  }, []);
 
   // Wall-drawing state
   const [isDrawing,    setIsDrawing]    = useState(false);
@@ -125,68 +158,9 @@ export default function Canvas2D({
   //   { type:'endpoint',         wallId, whichEnd, latestCoords }
   //   { type:'furniture',        furnitureId, offsetX, offsetY, latestX, latestY }
   //   { type:'furniture-rotate', furnitureId, startAngleDeg, itemStartRotation, latestDeg }
+  //   { type:'stair',            stairId, offsetX, offsetY, latestX, latestY }
+  //   { type:'stair-rotate',     stairId, startAngleDeg, itemStartRotation, latestDeg }
   const [dragTarget, setDragTarget] = useState(null);
-
-  // ---------------------------------------------------------------------------
-  // Overlap detection (visual warning — no blocking)
-  //   - Furniture vs furniture (same room)
-  //   - Furniture vs walls on this floor
-  // ---------------------------------------------------------------------------
-  const overlappingIds = useMemo(() => {
-    const ids = new Set();
-    // Furniture-to-furniture
-    for (let i = 0; i < furniture.length; i++) {
-      for (let j = i + 1; j < furniture.length; j++) {
-        if (
-          furniture[i].roomId === furniture[j].roomId &&
-          checkFurnitureOverlap(furniture[i], furniture[j])
-        ) {
-          ids.add(furniture[i].id);
-          ids.add(furniture[j].id);
-        }
-      }
-    }
-    // Furniture-to-wall
-    for (const item of furniture) {
-      for (const wall of walls) {
-        if (checkFurnitureWallOverlap(item, wall)) {
-          ids.add(item.id);
-          break; // one wall collision is enough to mark this item
-        }
-      }
-    }
-    return ids;
-  }, [furniture, walls]);
-
-  // ---------------------------------------------------------------------------
-  // Unsupported-wall detection (upper floors only, visual warning — no blocking)
-  // Samples 12 evenly-spaced points along the wall centreline and checks what
-  // fraction of them lie inside any closed room polygon on the floor below.
-  // A wall is only flagged if MORE THAN 50% of its length is unsupported,
-  // so partial overhangs and cantilevers do NOT trigger the warning.
-  // ---------------------------------------------------------------------------
-  const SUPPORT_SAMPLES   = 12;  // number of sample points along wall length
-  const SUPPORT_THRESHOLD = 0.5; // fraction of unsupported samples needed to warn
-
-  const unsupportedWallIds = useMemo(() => {
-    if (isGroundFloor || belowFloorLoops.length === 0) return new Set();
-    const ids = new Set();
-    for (const wall of walls) {
-      let unsupportedCount = 0;
-      for (let k = 0; k <= SUPPORT_SAMPLES; k++) {
-        const t = k / SUPPORT_SAMPLES;
-        const px = wall.start.x + t * (wall.end.x - wall.start.x);
-        const py = wall.start.y + t * (wall.end.y - wall.start.y);
-        const supported = belowFloorLoops.some((loop) =>
-          pointInPolygon({ x: px, y: py }, loop.points)
-        );
-        if (!supported) unsupportedCount++;
-      }
-      const unsupportedFraction = unsupportedCount / (SUPPORT_SAMPLES + 1);
-      if (unsupportedFraction > SUPPORT_THRESHOLD) ids.add(wall.id);
-    }
-    return ids;
-  }, [walls, belowFloorLoops, isGroundFloor]);
 
   // ---------------------------------------------------------------------------
   // Coordinate helpers
@@ -262,6 +236,27 @@ export default function Canvas2D({
       if (pointInPolygon({ x: rx, y: ry }, cornersPx)) return item;
     }
     return null;
+  }
+
+  function findNearestStair(rx, ry) {
+    for (let i = stairs.length - 1; i >= 0; i--) {
+      const s = stairs[i];
+      const polys = getStairPolygons(s);
+      for (const poly of polys) {
+        const polyPx = poly.map(p => ({ x: p.x * SCALE, y: p.y * SCALE }));
+        if (pointInPolygon({ x: rx, y: ry }, polyPx)) return s;
+      }
+    }
+    return null;
+  }
+
+  function getStairRotateHandlePixelPos(s) {
+    const halfD_px = ((s.run ?? 3) * SCALE) / 2;
+    const rad = ((s.rotation ?? 0) * Math.PI) / 180;
+    return {
+      x: s.x * SCALE + (halfD_px + ROTATE_HANDLE_OFFSET) * Math.sin(rad),
+      y: s.y * SCALE - (halfD_px + ROTATE_HANDLE_OFFSET) * Math.cos(rad),
+    };
   }
 
   function findLoopAtPoint(mx, my) {
@@ -343,6 +338,16 @@ export default function Canvas2D({
       return;
     }
 
+    // ---- Stair placement ----
+    if (mode === 'stairs') {
+      const mx = rx / SCALE, my = ry / SCALE;
+      const loop = findLoopAtPoint(mx, my);
+      if (loop && onAddStair) {
+        onAddStair({ type: selectedStairType, x: mx, y: my, rotation: 0, width: 1.1, run: 3.0, landingLength: 1.1, turnDirection: 'left', color: '#8b6b45' });
+      }
+      return;
+    }
+
     // ---- Select mode ----
     if (mode === 'select') {
       // 0. Rotate handle — must be tested before furniture body
@@ -361,6 +366,26 @@ export default function Canvas2D({
               startAngleDeg:       Math.atan2(ry - itemCy, rx - itemCx) * 180 / Math.PI,
               itemStartRotation:   selFurn.rotation ?? 0,
               latestDeg:           selFurn.rotation ?? 0,
+            });
+            e.target.setPointerCapture(e.pointerId);
+            return;
+          }
+        }
+
+        // 0.5 Rotate handle — Stair
+        const selStair = stairs.find((s) => s.id === selectedId);
+        if (selStair) {
+          const hp = getStairRotateHandlePixelPos(selStair);
+          if (Math.hypot(rx - hp.x, ry - hp.y) <= ROTATE_HANDLE_HIT) {
+            onStairRotateStart && onStairRotateStart();
+            const itemCx = selStair.x * SCALE;
+            const itemCy = selStair.y * SCALE;
+            setDragTarget({
+              type:               'stair-rotate',
+              stairId:            selStair.id,
+              startAngleDeg:       Math.atan2(ry - itemCy, rx - itemCx) * 180 / Math.PI,
+              itemStartRotation:   selStair.rotation ?? 0,
+              latestDeg:           selStair.rotation ?? 0,
             });
             e.target.setPointerCapture(e.pointerId);
             return;
@@ -418,6 +443,21 @@ export default function Canvas2D({
         return;
       }
 
+      // 3.5 Stair body
+      const stairHit = findNearestStair(rx, ry);
+      if (stairHit) {
+        onSelect(stairHit.id);
+        onStairMoveStart && onStairMoveStart();
+        setDragTarget({
+          type: 'stair', stairId: stairHit.id,
+          offsetX: stairHit.x - rx / SCALE,
+          offsetY: stairHit.y - ry / SCALE,
+          latestX: stairHit.x, latestY: stairHit.y,
+        });
+        e.target.setPointerCapture(e.pointerId);
+        return;
+      }
+
       // 4. Wall
       const wallHit = findNearestWall(rx, ry);
       if (wallHit) {
@@ -460,6 +500,14 @@ export default function Canvas2D({
     }
 
     if (mode === 'furniture') {
+      const mx = rx / SCALE, my = ry / SCALE;
+      const loop = findLoopAtPoint(mx, my);
+      setGhostPos({ x: mx, y: my });
+      setGhostLoopId(loop ? loop.id : null);
+      return;
+    }
+
+    if (mode === 'stairs') {
       const mx = rx / SCALE, my = ry / SCALE;
       const loop = findLoopAtPoint(mx, my);
       setGhostPos({ x: mx, y: my });
@@ -530,11 +578,36 @@ export default function Canvas2D({
           onSetFurnitureRotation && onSetFurnitureRotation(item.id, newRotation);
           setDragTarget((prev) => ({ ...prev, latestDeg: newRotation }));
         }
+      } else if (dragTarget.type === 'stair') {
+        const item = stairs.find((s) => s.id === dragTarget.stairId);
+        if (!item) return;
+        const proposedX = rx / SCALE + dragTarget.offsetX;
+        const proposedY = ry / SCALE + dragTarget.offsetY;
+        
+        // Live update — stairs are not physically clamped, just visually marked invalid later
+        onMoveStair && onMoveStair(item.id, proposedX, proposedY);
+        setDragTarget((prev) => ({ ...prev, latestX: proposedX, latestY: proposedY }));
+        
+      } else if (dragTarget.type === 'stair-rotate') {
+        const item = stairs.find((s) => s.id === dragTarget.stairId);
+        if (!item) return;
+        const itemCx = item.x * SCALE;
+        const itemCy = item.y * SCALE;
+        const currentAngleDeg = Math.atan2(ry - itemCy, rx - itemCx) * 180 / Math.PI;
+        const deltaAngle = currentAngleDeg - dragTarget.startAngleDeg;
+        let newRotation = ((dragTarget.itemStartRotation + deltaAngle) % 360 + 360) % 360;
+        if (snapRotation) newRotation = (Math.round(newRotation / 15) * 15) % 360;
+        
+        onSetStairRotation && onSetStairRotation(item.id, newRotation);
+        setDragTarget((prev) => ({ ...prev, latestDeg: newRotation }));
       }
     }
   }
 
   function handlePointerUp(e) {
+    if (e.target.hasPointerCapture && e.target.hasPointerCapture(e.pointerId)) {
+      e.target.releasePointerCapture(e.pointerId);
+    }
     // ---- Wall drawing commit ----
     if (mode === 'wall' && isDrawing) {
       setIsDrawing(false);
@@ -575,10 +648,28 @@ export default function Canvas2D({
         onCommitFurnitureRotation && onCommitFurnitureRotation(
           dragTarget.furnitureId, dragTarget.latestDeg
         );
+      } else if (dragTarget.type === 'stair' && dragTarget.latestX != null) {
+        onCommitMoveStair && onCommitMoveStair(
+          dragTarget.stairId, dragTarget.latestX, dragTarget.latestY
+        );
+      } else if (dragTarget.type === 'stair-rotate') {
+        onCommitStairRotation && onCommitStairRotation(
+          dragTarget.stairId, dragTarget.latestDeg
+        );
       }
 
       setDragTarget(null);
     }
+  }
+
+  function handlePointerCancel(e) {
+    if (e.target.hasPointerCapture && e.target.hasPointerCapture(e.pointerId)) {
+      e.target.releasePointerCapture(e.pointerId);
+    }
+    setIsDrawing(false);
+    setStartPoint(null);
+    setCurrentPoint(null);
+    setDragTarget(null);
   }
 
   // ---------------------------------------------------------------------------
@@ -654,7 +745,7 @@ export default function Canvas2D({
     const ph = d * SCALE;
     const rotDeg = item.rotation ?? 0;
     const isSelected    = item.id === selectedId;
-    const isOverlapping = overlappingIds.has(item.id);
+    const isOverlapping = overlappingFurnIds.has(item.id);
     const baseColor = item.color || FURNITURE_CATALOG[item.type]?.color || '#888888';
     const label    = FURNITURE_LABELS[item.type] || item.type.slice(0, 4).toUpperCase();
     const fontSize = Math.max(7, Math.min(pw, ph) * 0.28);
@@ -698,26 +789,127 @@ export default function Canvas2D({
     );
   }
 
+  function renderStairItem(item, key) {
+    const isSelected = item.id === selectedId;
+    const isInvalid = invalidStairIds.has(item.id);
+
+    const isFiniteNumber = (value) => Number.isFinite(value);
+    if (!isFiniteNumber(item.x) || !isFiniteNumber(item.y) || !isFiniteNumber(item.run) || !isFiniteNumber(item.width)) {
+      console.warn("Invalid stair dimensions/coordinates:", item);
+      return null;
+    }
+
+    const polys = getStairPolygons(item);
+    const rotDeg = item.rotation ?? 0;
+    const handleOffsetPx = ((item.run ?? 3) * SCALE) / 2 + ROTATE_HANDLE_OFFSET;
+
+    return (
+      <g key={key}>
+        {polys.map((poly, idx) => {
+          const pts = poly.map(p => `${p.x * SCALE},${p.y * SCALE}`).join(' ');
+          return (
+            <polygon key={idx} points={pts}
+              fill={item.color || '#8b6b45'} fillOpacity={isSelected ? 0.92 : 0.72}
+              stroke={isInvalid ? '#ef4444' : isSelected ? '#22c55e' : 'rgba(255,255,255,0.35)'}
+              strokeWidth={isInvalid ? 3 : isSelected ? 2.5 : 1}
+            />
+          );
+        })}
+        {isSelected && mode === 'select' && (
+          <g transform={`translate(${item.x * SCALE}, ${item.y * SCALE}) rotate(${rotDeg})`}>
+            <line x1={0} y1={-((item.run ?? 3) * SCALE)/2} x2={0} y2={-handleOffsetPx} stroke="#a78bfa" strokeWidth={1.5} strokeDasharray="3 3" />
+            <circle cx={0} cy={-handleOffsetPx} r={7} fill="#a78bfa" fillOpacity={0.9} stroke="white" strokeWidth={1.5} style={{ cursor: 'grab' }} />
+            <text x={11} y={-handleOffsetPx+4} fontSize={9} fill="#a78bfa" fontFamily="system-ui, sans-serif" style={{ pointerEvents: 'none', userSelect: 'none' }}>
+              {Math.round(rotDeg)}°
+            </text>
+          </g>
+        )}
+      </g>
+    );
+  }
+
   // Ghost preview
   const ghostRect = (() => {
-    if (mode !== 'furniture' || !ghostPos || !ghostLoopId || !selectedFurnitureType) return null;
-    const cat = FURNITURE_CATALOG[selectedFurnitureType];
-    if (!cat) return null;
-    const pw = cat.footprintW * SCALE;
-    const ph = cat.footprintD * SCALE;
-    return (
-      <rect x={ghostPos.x * SCALE - pw/2} y={ghostPos.y * SCALE - ph/2}
-        width={pw} height={ph} fill={cat.color} fillOpacity={0.28}
-        stroke={cat.color} strokeWidth={1.5} strokeDasharray="6 3" rx={3}
-        style={{ pointerEvents: 'none' }} />
-    );
+    if (mode === 'furniture' && ghostPos && ghostLoopId && selectedFurnitureType) {
+      const cat = FURNITURE_CATALOG[selectedFurnitureType];
+      if (!cat) return null;
+      const ghostItem = { id: 'ghost', type: selectedFurnitureType, x: ghostPos.x, y: ghostPos.y, rotation: 0, roomId: ghostLoopId };
+      const pw = cat.footprintW * SCALE;
+      const ph = cat.footprintD * SCALE;
+      
+      let isGhostInvalid = false;
+      for (const wall of walls) {
+        if (checkFurnitureWallOverlap(ghostItem, wall)) { isGhostInvalid = true; break; }
+      }
+      if (!isGhostInvalid) {
+        for (const f of furniture) {
+          if (f.roomId === ghostLoopId && checkFurnitureOverlap(ghostItem, f)) { isGhostInvalid = true; break; }
+        }
+      }
+
+      return (
+        <rect x={ghostPos.x * SCALE - pw/2} y={ghostPos.y * SCALE - ph/2}
+          width={pw} height={ph} fill={isGhostInvalid ? '#ef4444' : cat.color} fillOpacity={0.28}
+          stroke={isGhostInvalid ? '#ef4444' : cat.color} strokeWidth={1.5} strokeDasharray="6 3" rx={3}
+          style={{ pointerEvents: 'none' }} />
+      );
+    }
+    if (mode === 'stairs' && ghostPos && ghostLoopId && selectedStairType) {
+      const cat = STAIR_CATALOG[selectedStairType];
+      if (!cat) return null;
+      const ghostStair = { id: 'ghost-stair', type: selectedStairType, x: ghostPos.x, y: ghostPos.y, rotation: 0, width: 1.1, run: 3.0, landingLength: 1.1, turnDirection: 'left' };
+      
+      const isFiniteNumber = (value) => Number.isFinite(value);
+      if (!isFiniteNumber(ghostStair.x) || !isFiniteNumber(ghostStair.y)) {
+        console.warn("Invalid stair preview coordinates:", ghostStair);
+        return null;
+      }
+
+      let isGhostInvalid = false;
+      for (const wall of walls) {
+        if (checkStairWallOverlap(ghostStair, wall)) { isGhostInvalid = true; break; }
+      }
+      if (!isGhostInvalid) {
+        for (const f of furniture) {
+          if (checkStairFurnitureOverlap(ghostStair, f)) { isGhostInvalid = true; break; }
+        }
+      }
+      if (!isGhostInvalid) {
+        for (const s of stairs) {
+          if (checkStairOverlap(ghostStair, s)) { isGhostInvalid = true; break; }
+        }
+      }
+      if (!isGhostInvalid) {
+        let inAnyRoom = false;
+        for (const loop of closedLoops) {
+          if (checkStairInRoom(ghostStair, loop.points)) { inAnyRoom = true; break; }
+        }
+        if (!inAnyRoom) isGhostInvalid = true;
+      }
+
+      const polys = getStairPolygons(ghostStair);
+      return (
+        <g style={{ pointerEvents: 'none' }}>
+          {polys.map((poly, idx) => {
+            const pts = poly.map(p => `${p.x * SCALE},${p.y * SCALE}`).join(' ');
+            return (
+              <polygon key={idx} points={pts}
+                fill={isGhostInvalid ? '#ef4444' : '#8b6b45'} fillOpacity={0.28}
+                stroke={isGhostInvalid ? '#ef4444' : '#8b6b45'} strokeWidth={1.5} strokeDasharray="6 3"
+              />
+            );
+          })}
+        </g>
+      );
+    }
+    return null;
   })();
 
   let cursorStyle = 'crosshair';
   if (mode === 'door' || mode === 'window') cursorStyle = hoveredWallId ? 'cell' : 'not-allowed';
-  else if (mode === 'furniture') cursorStyle = ghostLoopId ? 'copy' : 'not-allowed';
+  else if (mode === 'furniture' || mode === 'stairs') cursorStyle = ghostLoopId ? 'copy' : 'not-allowed';
   else if (mode === 'select') {
-    if (dragTarget?.type === 'furniture-rotate') cursorStyle = 'grab';
+    if (dragTarget?.type === 'furniture-rotate' || dragTarget?.type === 'stair-rotate') cursorStyle = 'grab';
     else if (dragTarget) cursorStyle = 'grabbing';
     else cursorStyle = 'default';
   }
@@ -727,6 +919,7 @@ export default function Canvas2D({
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerCancel}
       style={{ touchAction: 'none', cursor: cursorStyle }}>
       <svg width="100%" height="100%" style={{ display: 'block' }}>
 
@@ -755,6 +948,9 @@ export default function Canvas2D({
 
         {/* Furniture */}
         {furniture.map((item, idx) => renderFurnitureItem(item, `furn-${item.id ?? idx}`))}
+
+        {/* Stairs */}
+        {stairs.map((item, idx) => renderStairItem(item, `stair-${item.id ?? idx}`))}
 
         {/* Ghost preview */}
         {ghostRect}

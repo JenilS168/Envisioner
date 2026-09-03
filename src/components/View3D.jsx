@@ -3,7 +3,8 @@ import { Canvas, useThree, useFrame } from '@react-three/fiber';
 import { OrbitControls, Grid } from '@react-three/drei';
 import * as THREE from 'three';
 import { FURNITURE_CATALOG, furnitureFootprint, checkFurnitureOverlap, checkFurnitureWallOverlap } from '../utils/furniture';
-import { findClosedLoops, computePolygonOverhang, computeSupportFraction } from '../utils/geometry';
+import { findClosedLoops, computePolygonOverhang, computeSupportFraction, pointInPolygon } from '../utils/geometry';
+import { STAIR_CATALOG, getStairPolygons, getStairOutline } from '../utils/stairs';
 
 
 // ---------------------------------------------------------------------------
@@ -141,7 +142,7 @@ function darkenColor(hex, factor = 0.62) {
 // ---------------------------------------------------------------------------
 function WallSegment({
   position, angle, length, height, thickness,
-  isSelected, onClick, wallColor, wallPreset,
+  isSelected, isUnsupported, onClick, wallColor, wallPreset,
   wallOpacity = 1, wallTransparent = false,
 }) {
   if (length <= 0 || height <= 0) return null;
@@ -154,15 +155,23 @@ function WallSegment({
     [wallPreset, wallColor]
   );
 
+  const materialProps = isUnsupported ? {
+    color: '#ef4444',
+    emissive: '#ef4444',
+    emissiveIntensity: 0.5,
+  } : {
+    color: isSelected ? '#86efac' : wallColor,
+    map: !isSelected ? wallTexture : null,
+  };
+
   return (
     <mesh position={position} rotation={[0, -angle, 0]} castShadow receiveShadow onClick={onClick}>
       <boxGeometry args={[length, height, thickness]} />
       <meshStandardMaterial
-        color={isSelected ? '#86efac' : wallColor}
-        map={!isSelected ? wallTexture : null}
+        {...materialProps}
         roughness={0.7}
-        transparent={wallTransparent}
-        opacity={wallOpacity}
+        transparent={wallTransparent || isUnsupported}
+        opacity={isUnsupported ? Math.max(0.7, wallOpacity) : wallOpacity}
         depthWrite={!wallTransparent}
       />
     </mesh>
@@ -285,7 +294,7 @@ function Window3D({ win, wallStart, wallAngle, wallUx, wallUz, wallLength, wallT
 // ---------------------------------------------------------------------------
 // FlatRoof3D — extruded flat slab over a closed wall loop
 // ---------------------------------------------------------------------------
-function FlatRoof3D({ loop, wallHeight = 3, roofColor, roofPreset, hidden = false }) {
+function FlatRoof3D({ loop, wallHeight = 3, roofColor, roofPreset, hidden = false, stairHoles = [] }) {
   const { points } = loop;
 
   const roofTexture = useMemo(
@@ -301,8 +310,23 @@ function FlatRoof3D({ loop, wallHeight = 3, roofColor, roofPreset, hidden = fals
       s.lineTo(points[i].x, -points[i].y);
     }
     s.closePath();
+
+    if (stairHoles && stairHoles.length > 0) {
+      for (const holePoly of stairHoles) {
+        if (!holePoly || holePoly.length < 3) continue;
+        if (!pointInPolygon(holePoly[0], points)) continue;
+        const h = new THREE.Path();
+        h.moveTo(holePoly[0].x, -holePoly[0].y);
+        for (let i = 1; i < holePoly.length; i++) {
+          h.lineTo(holePoly[i].x, -holePoly[i].y);
+        }
+        h.closePath();
+        s.holes.push(h);
+      }
+    }
+
     return s;
-  }, [points]);
+  }, [points, stairHoles]);
 
   const extrudeSettings = useMemo(
     () => ({ depth: 0.18, bevelEnabled: true, bevelSegments: 2, steps: 1, bevelSize: 0.06, bevelThickness: 0.06 }),
@@ -487,7 +511,7 @@ function CantileverSlab3D({ strips, wallHeight = 3, roofColor, roofPreset, isExt
 // Resolves per-wall material (wall.material) with fallback to globals.
 // ---------------------------------------------------------------------------
 function Wall3D({
-  wall, wallDoors, wallWindows, isSelected, selectedId,
+  wall, wallDoors, wallWindows, isSelected, isUnsupported, selectedId,
   onWallClick, onDoorClick, onWindowClick,
   globalMaterials,
   wallOpacity = 1, wallTransparent = false,
@@ -568,6 +592,7 @@ function Wall3D({
     angle: geom.angle,
     thickness,
     isSelected,
+    isUnsupported,
     wallColor,
     wallPreset,
     wallOpacity,
@@ -669,7 +694,7 @@ function Furniture3D({ item, isSelected, isOverlapping, snapRotation, onClick, o
   const darkColor  = darkenColor(mainColor);
   const lightColor = '#f0ece4';
   const metalColor = '#c8c8c8';
-  const rotRad = ((item.rotation ?? 0) * Math.PI) / 180;
+  const rotRad = (-(item.rotation ?? 0) * Math.PI) / 180; // Negate: SVG CW-positive → Three.js CCW-positive
 
   // Refs for 3D rotate handle drag
   const isDraggingHandle  = useRef(false);
@@ -944,7 +969,7 @@ function Furniture3D({ item, isSelected, isOverlapping, snapRotation, onClick, o
 // ---------------------------------------------------------------------------
 // Floor3D — a clickable slab representing the floor of a closed loop/room
 // ---------------------------------------------------------------------------
-function Floor3D({ loop, isSelected, onClick, floorColor }) {
+function Floor3D({ loop, isSelected, onClick, floorColor, stairHoles = [] }) {
   const { points } = loop;
 
   const shape = useMemo(() => {
@@ -955,8 +980,23 @@ function Floor3D({ loop, isSelected, onClick, floorColor }) {
       s.lineTo(points[i].x, -points[i].y);
     }
     s.closePath();
+
+    if (stairHoles && stairHoles.length > 0) {
+      for (const holePoly of stairHoles) {
+        if (!holePoly || holePoly.length < 3) continue;
+        if (!pointInPolygon(holePoly[0], points)) continue;
+        const h = new THREE.Path();
+        h.moveTo(holePoly[0].x, -holePoly[0].y);
+        for (let i = 1; i < holePoly.length; i++) {
+          h.lineTo(holePoly[i].x, -holePoly[i].y);
+        }
+        h.closePath();
+        s.holes.push(h);
+      }
+    }
+
     return s;
-  }, [points]);
+  }, [points, stairHoles]);
 
   const extrudeSettings = useMemo(() => ({ depth: 0.05, bevelEnabled: false }), []);
   const baseColor = floorColor || '#94a3b8';
@@ -980,25 +1020,162 @@ function Floor3D({ loop, isSelected, onClick, floorColor }) {
 }
 
 // ---------------------------------------------------------------------------
-// FloorScene — renders one floor's walls, doors, windows, floors, roofs,
-// and furniture at a given Y base offset.
-//
-// When `isActive` is false (showing background floors in "Show All Floors" mode)
-// interactive handles are disabled and the scene is slightly dimmed.
+// Stair3D — rendering the 3D stairs
+// ---------------------------------------------------------------------------
+function Stair3D({ stair, floorHeight, isSelected, isOverlapping, onClick }) {
+  const { type, x, y, rotation, width, run, landingLength, turnDirection, stepCount, color } = stair;
+  const w = width ?? 1.0;
+  const d = run ?? 3.0;
+  const l = landingLength ?? 1.0;
+  const N = stepCount ?? 15;
+  const riser = floorHeight / N;
+  
+  const rotRad = (-(rotation ?? 0) * Math.PI) / 180; // Negative because Three.js Y-up vs Canvas2D Y-down
+
+  const stairMaterialProps = isOverlapping ? {
+    color: '#ef4444',
+    emissive: '#ef4444',
+    emissiveIntensity: 0.5,
+  } : {
+    color: color || '#8b6b45',
+  };
+
+  const renderSteps = () => {
+    const steps = [];
+    if (type === 'straight') {
+      const tread = d / N;
+      for (let i = 0; i < N; i++) {
+        const h = (i + 1) * riser;
+        steps.push(
+          <mesh key={`s-${i}`} position={[0, h/2, -d/2 + tread/2 + i * tread]}>
+            <boxGeometry args={[w, h, tread]} />
+            <meshStandardMaterial {...stairMaterialProps} />
+          </mesh>
+        );
+      }
+    } else if (type === 'l_shape') {
+      const f1Run = d/2;
+      const f2Run = d/2;
+      const N1 = Math.floor((N - 1) / 2);
+      const N2 = N - 1 - N1;
+      const t1 = f1Run / N1;
+      const t2 = f2Run / N2;
+      
+      for (let i = 0; i < N1; i++) {
+        const h = (i + 1) * riser;
+        steps.push(
+          <mesh key={`f1-${i}`} position={[0, h/2, -f1Run/2 + t1/2 + i * t1]}>
+            <boxGeometry args={[w, h, t1]} />
+            <meshStandardMaterial {...stairMaterialProps} />
+          </mesh>
+        );
+      }
+      
+      const hLand = (N1 + 1) * riser;
+      const landingCenterZ = f1Run/2 + l/2;
+      steps.push(
+        <mesh key="landing" position={[0, hLand/2, landingCenterZ]}>
+          <boxGeometry args={[w, hLand, l]} />
+          <meshStandardMaterial {...stairMaterialProps} />
+        </mesh>
+      );
+      
+      const dir = turnDirection === 'left' ? -1 : 1;
+      for (let i = 0; i < N2; i++) {
+        const h = (N1 + 1 + i + 1) * riser;
+        const cx = (dir * w/2) + (dir * t2/2) + (dir * i * t2);
+        steps.push(
+          <mesh key={`f2-${i}`} position={[cx, h/2, landingCenterZ]}>
+            <boxGeometry args={[t2, h, w]} />
+            <meshStandardMaterial {...stairMaterialProps} />
+          </mesh>
+        );
+      }
+    } else if (type === 'u_shape') {
+      const gap = 0.2;
+      const f1Run = d/2;
+      const f2Run = d/2;
+      const N1 = Math.floor((N - 1) / 2);
+      const N2 = N - 1 - N1;
+      const t1 = f1Run / N1;
+      const t2 = f2Run / N2;
+      
+      const f1OffsetX = turnDirection === 'left' ? (w/2 + gap/2) : -(w/2 + gap/2);
+      
+      for (let i = 0; i < N1; i++) {
+        const h = (i + 1) * riser;
+        steps.push(
+          <mesh key={`f1-${i}`} position={[f1OffsetX, h/2, -f1Run/2 + t1/2 + i * t1]}>
+            <boxGeometry args={[w, h, t1]} />
+            <meshStandardMaterial {...stairMaterialProps} />
+          </mesh>
+        );
+      }
+      
+      const hLand = (N1 + 1) * riser;
+      const landingCenterZ = f1Run/2 + l/2;
+      const totalLandingW = w * 2 + gap;
+      steps.push(
+        <mesh key="landing" position={[0, hLand/2, landingCenterZ]}>
+          <boxGeometry args={[totalLandingW, hLand, l]} />
+          <meshStandardMaterial {...stairMaterialProps} />
+        </mesh>
+      );
+      
+      const f2OffsetX = turnDirection === 'left' ? -(w/2 + gap/2) : (w/2 + gap/2);
+      for (let i = 0; i < N2; i++) {
+        const h = (N1 + 1 + i + 1) * riser;
+        steps.push(
+          <mesh key={`f2-${i}`} position={[f2OffsetX, h/2, landingCenterZ - l/2 - t2/2 - i * t2]}>
+            <boxGeometry args={[w, h, t2]} />
+            <meshStandardMaterial {...stairMaterialProps} />
+          </mesh>
+        );
+      }
+    }
+    return steps;
+  };
+
+  return (
+    <group
+      position={[x, 0, y]}
+      rotation={[0, rotRad, 0]}
+      userData={{ kind: 'staircase', stairId: stair.id }}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (onClick) onClick(stair.id);
+      }}
+    >
+      {renderSteps()}
+      {/* Visual marker for extreme overhangs, or selection ring */}
+      {isSelected && (
+        <mesh position={[0, 0.05, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+          <planeGeometry args={[w * 1.5, d * 1.5]} />
+          <meshBasicMaterial color="#22c55e" wireframe={true} />
+        </mesh>
+      )}
+    </group>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// FloorScene — renders a single complete floor (walls, rooms, furniture)
 // ---------------------------------------------------------------------------
 function FloorScene({
   walls = [],
   doors = [],
   windows = [],
   rooms = [],
-  closedLoops,          // pre-computed from this floor's walls
-  materials = {},
+  closedLoops = [],
   furniture = [],
+  stairs = [],
+  materials = {},
   selectedId,
   mode,
   snapRotation,
   isActive,             // whether this is the currently-edited floor
   baseY = 0,            // world Y offset for this floor
+  floorHeight = 3,      // world Y offset for next floor relative to this one
   onWallClick,
   onDoorClick,
   onWindowClick,
@@ -1008,11 +1185,15 @@ function FloorScene({
   onSetFurnitureRotation,
   onCommitFurnitureRotation,
   overlappingFurnIds,
+  invalidStairIds,
+  unsupportedWallIds,
   globalMaterials,
   // Cantilever ceiling extensions: parts of upper-floor overhangs that need
   // a supporting slab rendered at this floor's ceiling height.
   // Each entry: { strips, wallHeight, roofColor, roofPreset, isExtreme }
   cantileverSlabs = [],
+  ceilingHoles = [],
+  floorHoles = [],
   // 3D Viewing Controls
   viewMode = 'normal',   // 'normal' | 'xray' | 'hidden'
   isAboveActive = false, // true when this floor is above the active floor (all-floors mode)
@@ -1046,6 +1227,7 @@ function FloorScene({
           const wd = doors.filter((d) => d.wallId === wall.id);
           const ww = windows.filter((w) => w.wallId === wall.id);
           const isSel = isActive && wall.id === selectedId;
+          const isUnsupported = isActive && unsupportedWallIds && unsupportedWallIds.has(wall.id);
           return (
             <Wall3D
               key={wall.id}
@@ -1053,6 +1235,7 @@ function FloorScene({
               wallDoors={wd}
               wallWindows={ww}
               isSelected={isSel}
+              isUnsupported={isUnsupported}
               selectedId={isActive ? selectedId : null}
               globalMaterials={globalMaterials}
               wallOpacity={wallOpacity}
@@ -1079,13 +1262,14 @@ function FloorScene({
               loop={loop}
               isSelected={isSel}
               floorColor={room.floorColor}
+              stairHoles={floorHoles}
               onClick={() => isActive && onRoomClick && onRoomClick(loop.id)}
             />
             {roof && roof.enabled && (
               roof.type === 'gable' ? (
                 <GableRoof3D
                   loop={loop}
-                  wallHeight={3}
+                  wallHeight={floorHeight}
                   roofHeight={roof.height || 1.5}
                   roofColor={roofColor}
                   roofPreset={roofPreset}
@@ -1094,10 +1278,11 @@ function FloorScene({
               ) : (
                 <FlatRoof3D
                   loop={loop}
-                  wallHeight={3}
+                  wallHeight={floorHeight}
                   roofColor={roofColor}
                   roofPreset={roofPreset}
                   hidden={roofsHidden}
+                  stairHoles={ceilingHoles}
                 />
               )
             )}
@@ -1117,6 +1302,18 @@ function FloorScene({
           onRotateStart={isActive ? onFurnRotateStart : null}
           onRotate={isActive ? onSetFurnitureRotation : null}
           onRotateCommit={isActive ? onCommitFurnitureRotation : null}
+        />
+      ))}
+
+      {/* Stair items */}
+      {stairs.map((item) => (
+        <Stair3D
+          key={item.id}
+          stair={item}
+          floorHeight={floorHeight}
+          isSelected={isActive && item.id === selectedId}
+          isOverlapping={isActive && invalidStairIds && invalidStairIds.has(item.id)}
+          onClick={() => { if (isActive && mode === 'select') onFurnClick && onFurnClick(item.id); }}
         />
       ))}
 
@@ -1246,6 +1443,10 @@ export default function View3D({
   closedLoops = [],
   materials: materialsProp = {},
   furniture = [],
+  stairs = [],
+  invalidStairIds = new Set(),
+  overlappingFurnIds = new Set(),
+  unsupportedWallIds = new Set(),
   // Multi-floor props
   allFloors = [],
   activeFloorId,
@@ -1278,33 +1479,16 @@ export default function View3D({
     ? (allFloors[activeFloorIdx]?.walls || walls)
     : walls;
 
-  // Compute which furniture items overlap another item in the same room OR any wall (active floor only)
-  const overlappingFurnIds = useMemo(() => {
-    const ids = new Set();
-    // Furniture-to-furniture
-    for (let i = 0; i < furniture.length; i++) {
-      for (let j = i + 1; j < furniture.length; j++) {
-        if (
-          furniture[i].roomId === furniture[j].roomId &&
-          checkFurnitureOverlap(furniture[i], furniture[j])
-        ) {
-          ids.add(furniture[i].id);
-          ids.add(furniture[j].id);
-        }
+  const floorHeights = useMemo(() => {
+    return allFloors.map((f, idx) => {
+      if (idx + 1 < allFloors.length) {
+        return (floorBaseYs[idx + 1] ?? 0) - (floorBaseYs[idx] ?? 0);
       }
-    }
-    // Furniture-to-wall
-    for (const item of furniture) {
-      if (ids.has(item.id)) continue; // already flagged
-      for (const wall of walls) {
-        if (checkFurnitureWallOverlap(item, wall)) {
-          ids.add(item.id);
-          break;
-        }
-      }
-    }
-    return ids;
-  }, [furniture, walls]);
+      return f.walls?.length > 0 ? Math.max(...f.walls.map(w => w.height ?? 3)) : 3;
+    });
+  }, [allFloors, floorBaseYs]);
+
+  const activeFloorHeight = floorHeights[activeFloorIdx] ?? 3;
 
   // Pre-compute closed loops for all floors when showing all
   const allFloorLoops = useMemo(() => {
@@ -1374,6 +1558,48 @@ export default function View3D({
 
     return result;
   }, [showAllFloors, allFloors]);
+
+  const stairHolesByFloor = useMemo(() => {
+    const ceilingHoles = {}; 
+    const floorHoles = {};
+    
+    if (showAllFloors) {
+      for (let i = 0; i < allFloors.length; i++) {
+        const floorStairs = allFloors[i].stairs || [];
+        const outlines = [];
+        for (const s of floorStairs) {
+          const outline = getStairOutline(s);
+          if (outline.length >= 3) outlines.push(outline);
+        }
+        if (outlines.length > 0) {
+          ceilingHoles[i] = outlines;
+          if (i + 1 < allFloors.length) {
+            floorHoles[i + 1] = outlines;
+          }
+        }
+      }
+    } else {
+      const outlines = [];
+      for (const s of (stairs || [])) {
+        const outline = getStairOutline(s);
+        if (outline.length >= 3) outlines.push(outline);
+      }
+      ceilingHoles[0] = outlines;
+      
+      const activeIdx = allFloors.findIndex((f) => f.id === activeFloorId);
+      if (activeIdx > 0 && allFloors[activeIdx - 1]) {
+        const belowStairs = allFloors[activeIdx - 1].stairs || [];
+        const lowerOutlines = [];
+        for (const s of belowStairs) {
+          const outline = getStairOutline(s);
+          if (outline.length >= 3) lowerOutlines.push(outline);
+        }
+        floorHoles[0] = lowerOutlines;
+      }
+    }
+    
+    return { ceilingHoles, floorHoles };
+  }, [showAllFloors, allFloors, stairs, activeFloorId]);
 
   function handleRoomClick(roomId) {
     if (mode === 'select') onSelect && onSelect(roomId);
@@ -1472,11 +1698,13 @@ export default function View3D({
                 closedLoops={floorLoops}
                 materials={floor.materials || {}}
                 furniture={floor.furniture || []}
+                stairs={floor.stairs || []}
                 selectedId={isActive ? selectedId : null}
                 mode={mode}
                 snapRotation={snapRotation}
                 isActive={isActive}
                 baseY={baseY}
+                floorHeight={floorHeights[idx] ?? 3}
                 onWallClick={handleWallClick}
                 onDoorClick={handleDoorClick}
                 onWindowClick={handleWindowClick}
@@ -1486,8 +1714,12 @@ export default function View3D({
                 onSetFurnitureRotation={onSetFurnitureRotation}
                 onCommitFurnitureRotation={onCommitFurnitureRotation}
                 overlappingFurnIds={isActive ? overlappingFurnIds : new Set()}
+                invalidStairIds={isActive ? invalidStairIds : new Set()}
+                unsupportedWallIds={isActive ? unsupportedWallIds : new Set()}
                 globalMaterials={floorGlobals}
                 cantileverSlabs={cantileverSlabsByFloor[idx] || []}
+                ceilingHoles={stairHolesByFloor.ceilingHoles[idx] || []}
+                floorHoles={stairHolesByFloor.floorHoles[idx] || []}
                 viewMode={viewMode}
                 isAboveActive={isAboveActive}
               />
@@ -1503,11 +1735,13 @@ export default function View3D({
             closedLoops={closedLoops}
             materials={materialsProp}
             furniture={furniture}
+            stairs={stairs}
             selectedId={selectedId}
             mode={mode}
             snapRotation={snapRotation}
             isActive={true}
             baseY={0}
+            floorHeight={activeFloorHeight}
             onWallClick={handleWallClick}
             onDoorClick={handleDoorClick}
             onWindowClick={handleWindowClick}
@@ -1517,7 +1751,11 @@ export default function View3D({
             onSetFurnitureRotation={onSetFurnitureRotation}
             onCommitFurnitureRotation={onCommitFurnitureRotation}
             overlappingFurnIds={overlappingFurnIds}
+            invalidStairIds={invalidStairIds}
+            unsupportedWallIds={unsupportedWallIds}
             globalMaterials={globalMaterials}
+            ceilingHoles={stairHolesByFloor.ceilingHoles[0] || []}
+            floorHoles={stairHolesByFloor.floorHoles[0] || []}
             viewMode={viewMode}
             isAboveActive={false}
           />

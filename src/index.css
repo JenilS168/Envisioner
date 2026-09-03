@@ -802,3 +802,9 @@ kbd {
   background: rgba(59, 130, 246, 0.28);
 }
 
+/* ---- Canvas Interaction ---- */
+.canvas-2d-container {
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
