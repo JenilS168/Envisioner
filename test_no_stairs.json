@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "projectId": "no-stairs-project",
+  "projectName": "Pre-Stair Project",
+  "floors": [
+    {
+      "id": "floor-0",
+      "label": "Ground Floor",
+      "walls": [
+        { "id": "wall-1", "start": { "x": 2, "y": 2 }, "end": { "x": 6, "y": 2 } },
+        { "id": "wall-2", "start": { "x": 6, "y": 2 }, "end": { "x": 6, "y": 5 } },
+        { "id": "wall-3", "start": { "x": 6, "y": 5 }, "end": { "x": 2, "y": 5 } },
+        { "id": "wall-4", "start": { "x": 2, "y": 5 }, "end": { "x": 2, "y": 2 } }
+      ],
+      "doors": [],
+      "windows": [],
+      "rooms": [],
+      "materials": {},
+      "furniture": [
+        { "id": "furn-old-1", "type": "table", "x": 4, "y": 3.5, "rotation": 0, "scale": 1.0 }
+      ]
+    }
+  ],
+  "settings": {},
+  "metadata": {}
+}

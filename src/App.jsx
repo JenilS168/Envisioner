@@ -6,6 +6,9 @@ import Sidebar from './components/Sidebar';
 import Canvas2D from './components/Canvas2D';
 import View3D from './components/View3D';
 import DebugPanel from './components/DebugPanel';
+import LandingPage from './components/LandingPage';
+import StatusBar from './components/StatusBar';
+import TemplateGuideDrawer from './components/TemplateGuideDrawer';
 import useHistory from './hooks/useHistory';
 import { findClosedLoops } from './utils/geometry';
 import { FURNITURE_CATALOG } from './utils/furniture';
@@ -18,6 +21,14 @@ import {
   defaultFloorLabel,
 } from './utils/floors';
 import { computeFloorValidations } from './utils/validation';
+import {
+  normaliseProject,
+  designToProject,
+  projectToDesign,
+  saveProjectToFile,
+  loadProjectFromFile,
+} from './utils/project';
+import { exportGlb } from './utils/exportGlb';
 import './index.css';
 
 // ---------------------------------------------------------------------------
@@ -55,6 +66,9 @@ function App() {
     reset,
   } = useHistory(INITIAL_DESIGN);
 
+  // ---- View routing ----
+  const [currentView, setCurrentView]        = useState('home'); // 'home' | 'studio'
+
   // ---- UI state (not part of the design model) ----
   const [activeFloorId, setActiveFloorId]   = useState('floor-0');
   const [showAllFloors, setShowAllFloors]    = useState(false);
@@ -64,9 +78,71 @@ function App() {
   const [selectedFurnitureType, setSelectedFurnitureType] = useState('bed');
   const [selectedStairType, setSelectedStairType] = useState('straight');
   const [snapRotation, setSnapRotation]      = useState(true);
+  const [hintDismissed, setHintDismissed]    = useState(false);
+
+  // ---- Viewport layout state ----
+  const [viewportMode, setViewportMode]       = useState('split'); // '2d' | 'split' | '3d'
+  const [splitPct, setSplitPct]               = useState(50);      // 15% - 85%
+  const [isDraggingSplit, setIsDraggingSplit] = useState(false);
+  const splitContainerRef                     = useRef(null);
+
+  // ---- Template guide state ----
+  const [activeTemplateGuide, setActiveTemplateGuide] = useState(null); // last loaded catalog entry
+  const [isGuideOpen, setIsGuideOpen] = useState(false);                // drawer visibility
+  // ---- 2D canvas auto-center trigger (incremented on template load) ----
+  const [canvas2dCenterTrigger, setCanvas2dCenterTrigger] = useState(0);
+
+  // ---- Project-level metadata (not part of the undoable design model) ----
+  const [projectMeta, setProjectMeta]        = useState({});
+  const [projectName, setProjectName]        = useState('Untitled Project');
+
+  // ---- Dirty tracking: has the design been modified since last save? ----
+  const savedDesignRef = useRef(null);
+  const isDirty = savedDesignRef.current !== null && savedDesignRef.current !== design;
 
   // ---- Interaction snapshots — saved at drag/interaction START ----
   const snapRef = useRef(null);
+
+  // ---- Viewport split drag handlers ----
+  const handleSplitMouseDown = useCallback((e) => {
+    e.preventDefault();
+    setIsDraggingSplit(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isDraggingSplit) return;
+
+    const handleMouseMove = (e) => {
+      if (!splitContainerRef.current) return;
+      const rect = splitContainerRef.current.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      const rawPct = ((e.clientX - rect.left) / rect.width) * 100;
+      const clamped = Math.max(15, Math.min(85, rawPct));
+      setSplitPct(clamped);
+    };
+
+    const handleMouseUp = () => {
+      setIsDraggingSplit(false);
+      window.dispatchEvent(new Event('resize'));
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDraggingSplit]);
+
+  const handleSelectViewportPreset = useCallback((targetMode) => {
+    setViewportMode(targetMode);
+    if (targetMode === 'split') {
+      setSplitPct(50);
+    }
+    setTimeout(() => {
+      window.dispatchEvent(new Event('resize'));
+    }, 50);
+  }, []);
 
   // ---- Migration effect: wrap old flat saves into floors format ----
   useEffect(() => {
@@ -155,23 +231,27 @@ function App() {
   const handleAddFloor = useCallback(() => {
     const floors = design.floors || [];
 
-    // ---- Gate: top floor must have at least one closed structure with a roof ----
+    // ---- Gate: block if the current top floor has any pitched (non-flat) roof ----
     const topFloor = floors[floors.length - 1];
     if (topFloor) {
       const topLoops = findClosedLoops(topFloor.walls || []);
       const topRooms = topFloor.rooms || [];
-      const hasRoof = topLoops.some((loop) => {
+      const pitchedRoom = topLoops.reduce((found, loop) => {
+        if (found) return found;
         const room = topRooms.find((r) => r.id === loop.id);
-        return room?.roof?.enabled === true;
-      });
-      if (!hasRoof) {
+        if (room?.roof?.enabled && room.roof.type !== 'flat') return room;
+        return null;
+      }, null);
+      if (pitchedRoom) {
+        const roofType = pitchedRoom.roof.type || 'pitched';
         alert(
-          `Cannot add a new floor: "${topFloor.label}" has no closed structure with a roof/ceiling enabled.\n\n` +
-          'Draw walls to form at least one closed room, then enable a roof on it before building the next floor.'
+          `Cannot add a floor above "${topFloor.label}" — it has a ${roofType} roof that would physically collide with the new floor.\n\n` +
+          'Either remove the pitched roof, or change it to a Flat roof before adding a floor above it.'
         );
         return;
       }
     }
+
 
     const newIndex = floors.length;
     const label = defaultFloorLabel(newIndex);
@@ -332,9 +412,156 @@ function App() {
 
   /** Clear the entire design and history */
   const handleClear = useCallback(() => {
+    // eslint-disable-next-line no-restricted-globals
+    if (!confirm('Clear the entire design and reset to blank? This cannot be undone.')) return;
     reset(INITIAL_DESIGN);
     setActiveFloorId('floor-0');
     setSelectedId(null);
+    setMode('wall');
+    setShowAllFloors(false);
+    setProjectMeta({});
+    setProjectName('Untitled Project');
+    savedDesignRef.current = null;
+    setHintDismissed(false);
+    setIsGuideOpen(false);
+  }, [reset]);
+
+  /** Navigate back to the landing page */
+  const handleGoHome = useCallback(() => {
+    setCurrentView('home');
+    setSelectedId(null);
+    setMode('wall');
+    setIsGuideOpen(false);
+  }, []);
+
+  /** Load a starter template from the landing page (or directly from TEMPLATE_CATALOG). */
+  const handleLoadTemplate = useCallback((tpl) => {
+    // tpl must have: { project: schemaV1Object, activeFloorId, title, ... }
+    // Run through normaliseProject to validate + fill defaults, then extract design.
+    let loadedDesign;
+    try {
+      const raw = tpl.project || tpl.design; // support both shapes for compatibility
+      const { project } = normaliseProject(raw);
+      loadedDesign = projectToDesign(project);
+    } catch (err) {
+      // eslint-disable-next-line no-restricted-globals
+      alert(`Failed to load template "${tpl.title}": ${err.message}`);
+      return;
+    }
+
+    reset(loadedDesign);
+    const firstFloorId = loadedDesign.floors[0]?.id || 'floor-0';
+    setActiveFloorId(tpl.activeFloorId || firstFloorId);
+    setSelectedId(null);
+    setMode('wall');
+    setShowAllFloors(false);
+    setProjectMeta({});
+    setProjectName(tpl.title);
+    savedDesignRef.current = null;
+    setHintDismissed(false);
+    setActiveTemplateGuide(tpl);   // remember which template
+    setIsGuideOpen(true);           // open the guide drawer
+    setCanvas2dCenterTrigger((n) => n + 1); // auto-fit 2D canvas
+    setCurrentView('studio');
+  }, [reset]);
+
+  /** Close the template guide drawer */
+  const handleCloseGuide = useCallback(() => {
+    setIsGuideOpen(false);
+  }, []);
+
+  /** Toggle the template guide drawer (for Header button — re-opens last guide) */
+  const handleToggleGuide = useCallback(() => {
+    setIsGuideOpen((prev) => !prev);
+  }, []);
+
+  /** Update the project name */
+  const handleProjectNameChange = useCallback((name) => {
+    setProjectName(name);
+    setProjectMeta((prev) => ({ ...prev, projectName: name }));
+  }, []);
+
+  // -----------------------------------------------------------------------
+  // SAVE / LOAD — project file I/O
+  //
+  // NOTE: window.confirm() and window.alert() are used as temporary
+  // placeholders in this iteration. They should be replaced with proper
+  // in-app modal / toast UI in a later polish pass.
+  // -----------------------------------------------------------------------
+
+  /** Save the current design as a versioned .json project file. */
+  const handleSaveProject = useCallback(() => {
+    const meta = { ...projectMeta, projectName };
+    const project = designToProject(design, meta);
+    saveProjectToFile(project);
+    savedDesignRef.current = design; // mark clean
+    // Saving must NOT change design state or create a history entry.
+  }, [design, projectMeta, projectName]);
+
+  /**
+   * Export the current design as a binary GLB file.
+   * Does NOT modify design state, call pushState, setStateOnly, or reset.
+   * Does NOT create a history entry.
+   * Shows a native alert on failure (temporary — to be replaced by an in-app toast/modal).
+   */
+  const handleExportGlb = useCallback(() => {
+    exportGlb(design, projectMeta)
+      .then(() => {
+        // Success — file download has been initiated.
+        // A brief status message could be surfaced here in a future toast pass.
+      })
+      .catch((err) => {
+        // eslint-disable-next-line no-restricted-globals
+        alert(`GLB export failed: ${err.message}`);
+      });
+  }, [design, projectMeta]);
+
+  /** Load a .json project file, replacing the current design atomically. */
+  const handleLoadProject = useCallback(() => {
+    loadProjectFromFile()
+      .then(({ project, warnings }) => {
+        const name = project.projectName || 'Untitled Project';
+        // eslint-disable-next-line no-restricted-globals
+        const confirmed = confirm(
+          `Replace the current design with "${name}"?\n\nThis will clear undo/redo history.`
+        );
+        if (!confirmed) return;
+
+        // Extract internal design shape and replace state atomically
+        const loadedDesign = projectToDesign(project);
+        reset(loadedDesign);
+
+        // Reset ALL interaction state to sane defaults
+        setActiveFloorId(project.floors[0]?.id || 'floor-0');
+        setSelectedId(null);
+        setMode('wall');
+        setShowAllFloors(false);
+
+        // Store project metadata for round-tripping
+        setProjectMeta({
+          projectId:   project.projectId,
+          projectName: project.projectName,
+          units:       project.units,
+          settings:    project.settings,
+          createdAt:   project.metadata?.createdAt,
+        });
+
+        // Show warnings if any auto-fixes were applied
+        if (warnings.length > 0) {
+          // eslint-disable-next-line no-restricted-globals
+          alert(
+            `Project loaded successfully with ${warnings.length} note(s):\n\n` +
+            warnings.map((w, i) => `${i + 1}. ${w}`).join('\n')
+          );
+        }
+      })
+      .catch((err) => {
+        // Parse/validation errors leave current state completely untouched.
+        if (err.message !== 'File selection cancelled.') {
+          // eslint-disable-next-line no-restricted-globals
+          alert(err.message);
+        }
+      });
   }, [reset]);
 
   /** Select (or deselect) a wall, door, window, room, or furniture */
@@ -824,9 +1051,28 @@ function App() {
   // -----------------------------------------------------------------------
   // Render
   // -----------------------------------------------------------------------
+  // ---- Content-presence check (for onboarding hint) ----
+  const hasContent = walls.length > 0 || furniture.length > 0 || stairs.length > 0;
+
+  // ---- Landing page view ----
+  if (currentView === 'home') {
+    return (
+      <LandingPage
+        onLaunchStudio={() => setCurrentView('studio')}
+        onLoadTemplate={handleLoadTemplate}
+      />
+    );
+  }
+
   return (
     <div className="app-container">
       <Header
+        projectName={projectName}
+        onProjectNameChange={handleProjectNameChange}
+        onGoHome={handleGoHome}
+        onSaveProject={handleSaveProject}
+        onLoadProject={handleLoadProject}
+        onExportGlb={handleExportGlb}
         onClear={handleClear}
         onUndo={undo}
         onRedo={redo}
@@ -834,6 +1080,9 @@ function App() {
         canRedo={canRedo}
         selectedId={selectedId}
         onDeleteSelected={handleDeleteSelected}
+        isDirty={isDirty}
+        guideActive={isGuideOpen && activeTemplateGuide !== null}
+        onToggleGuide={handleToggleGuide}
       />
 
       <Toolbar mode={mode} onModeChange={setMode} />
@@ -849,99 +1098,167 @@ function App() {
         onToggleShowAll={() => setShowAllFloors((prev) => !prev)}
       />
 
+      <StatusBar
+        mode={mode}
+        hasContent={hasContent}
+        hintDismissed={hintDismissed}
+        onDismissHint={() => setHintDismissed(true)}
+      />
+
       <main className="main-content">
-        {/* LEFT — 2D canvas (always shows active floor only) */}
-        <div className="panel panel-left">
-          <Canvas2D
-            walls={walls}
-            doors={doors}
-            windows={windows}
-            closedLoops={closedLoops}
-            materials={materials}
-            furniture={furniture}
-            stairs={stairs}
-            selectedFurnitureType={selectedFurnitureType}
-            selectedStairType={selectedStairType}
-            snapRotation={snapRotation}
-            mode={mode}
-            selectedId={selectedId}
-            invalidStairIds={invalidStairIds}
-            overlappingFurnIds={overlappingFurnIds}
-            unsupportedWallIds={unsupportedWallIds}
-            // Below-floor reference data
-            belowFloorWalls={belowFloorWalls}
-            belowFloorLoops={belowFloorLoops}
-            isGroundFloor={activeFloorIndex <= 0}
-            onAddWall={handleAddWall}
-            onAddDoor={handleAddDoor}
-            onAddWindow={handleAddWindow}
-            onAddFurniture={handleAddFurniture}
-            onSelect={handleSelect}
-            // Door move — live/commit
-            onDoorMoveStart={handleDoorMoveStart}
-            onMoveDoor={handleMoveDoor}
-            onCommitMoveDoor={handleCommitMoveDoor}
-            // Window move — live/commit
-            onWindowMoveStart={handleWindowMoveStart}
-            onMoveWindow={handleMoveWindow}
-            onCommitMoveWindow={handleCommitMoveWindow}
-            // Wall endpoint drag — live/commit
-            onEndpointStart={handleEndpointStart}
-            onMoveWallEndpoint={handleMoveWallEndpoint}
-            onCommitWallEndpoint={handleCommitWallEndpoint}
-            // Furniture move — live/commit
-            onFurnMoveStart={handleFurnMoveStart}
-            onMoveFurniture={handleMoveFurniture}
-            onCommitMoveFurniture={handleCommitMoveFurniture}
-            // Furniture rotate handle (2D) — live/commit
-            onFurnRotateStart={handleFurnRotateStart}
-            onSetFurnitureRotation={handleSetFurnitureRotation}
-            onCommitFurnitureRotation={handleCommitFurnitureRotation}
-            
-            onAddStair={handleAddStair}
-            onStairMoveStart={handleStairMoveStart}
-            onMoveStair={handleMoveStair}
-            onCommitMoveStair={handleCommitMoveStair}
-            onStairRotateStart={handleStairRotateStart}
-            onSetStairRotation={handleSetStairRotation}
-            onCommitStairRotation={handleCommitStairRotation}
+        <div className="viewport-split" ref={splitContainerRef}>
+          {/* Floating Viewport Presets Switcher */}
+          <div className="vp-preset-bar" role="toolbar" aria-label="Viewport Layout">
+            <button
+              type="button"
+              className={`vp-preset-btn ${viewportMode === '2d' ? 'vp-preset-active' : ''}`}
+              onClick={() => handleSelectViewportPreset('2d')}
+              title="2D Drafting View Only"
+            >
+              2D Only
+            </button>
+            <button
+              type="button"
+              className={`vp-preset-btn ${viewportMode === 'split' ? 'vp-preset-active' : ''}`}
+              onClick={() => handleSelectViewportPreset('split')}
+              title="Split View (2D + 3D)"
+            >
+              Split
+            </button>
+            <button
+              type="button"
+              className={`vp-preset-btn ${viewportMode === '3d' ? 'vp-preset-active' : ''}`}
+              onClick={() => handleSelectViewportPreset('3d')}
+              title="3D Inspection View Only"
+            >
+              3D Only
+            </button>
+          </div>
 
-            // Misc
-            onToggleDoor={handleToggleDoor}
-          />
-        </div>
+          {/* LEFT — 2D canvas (always shows active floor only) */}
+          <div
+            className={`panel panel-left vp-pane ${viewportMode === '3d' ? 'vp-pane-hidden' : ''}`}
+            style={
+              viewportMode === 'split'
+                ? { width: `${splitPct}%`, flex: 'none' }
+                : viewportMode === '2d'
+                ? { width: '100%', flex: '1 1 0%' }
+                : { display: 'none' }
+            }
+          >
+            <Canvas2D
+              walls={walls}
+              doors={doors}
+              windows={windows}
+              closedLoops={closedLoops}
+              materials={materials}
+              furniture={furniture}
+              stairs={stairs}
+              selectedFurnitureType={selectedFurnitureType}
+              selectedStairType={selectedStairType}
+              snapRotation={snapRotation}
+              mode={mode}
+              selectedId={selectedId}
+              invalidStairIds={invalidStairIds}
+              overlappingFurnIds={overlappingFurnIds}
+              unsupportedWallIds={unsupportedWallIds}
+              // Below-floor reference data
+              belowFloorWalls={belowFloorWalls}
+              belowFloorLoops={belowFloorLoops}
+              isGroundFloor={activeFloorIndex <= 0}
+              onAddWall={handleAddWall}
+              onAddDoor={handleAddDoor}
+              onAddWindow={handleAddWindow}
+              onAddFurniture={handleAddFurniture}
+              onSelect={handleSelect}
+              // Door move — live/commit
+              onDoorMoveStart={handleDoorMoveStart}
+              onMoveDoor={handleMoveDoor}
+              onCommitMoveDoor={handleCommitMoveDoor}
+              // Window move — live/commit
+              onWindowMoveStart={handleWindowMoveStart}
+              onMoveWindow={handleMoveWindow}
+              onCommitMoveWindow={handleCommitMoveWindow}
+              // Wall endpoint drag — live/commit
+              onEndpointStart={handleEndpointStart}
+              onMoveWallEndpoint={handleMoveWallEndpoint}
+              onCommitWallEndpoint={handleCommitWallEndpoint}
+              // Furniture move — live/commit
+              onFurnMoveStart={handleFurnMoveStart}
+              onMoveFurniture={handleMoveFurniture}
+              onCommitMoveFurniture={handleCommitMoveFurniture}
+              // Furniture rotate handle (2D) — live/commit
+              onFurnRotateStart={handleFurnRotateStart}
+              onSetFurnitureRotation={handleSetFurnitureRotation}
+              onCommitFurnitureRotation={handleCommitFurnitureRotation}
+              
+              onAddStair={handleAddStair}
+              onStairMoveStart={handleStairMoveStart}
+              onMoveStair={handleMoveStair}
+              onCommitMoveStair={handleCommitMoveStair}
+              onStairRotateStart={handleStairRotateStart}
+              onSetStairRotation={handleSetStairRotation}
+              onCommitStairRotation={handleCommitStairRotation}
 
-        {/* RIGHT — live 3D viewport */}
-        <div className="panel panel-right">
-          <View3D
-            // Active floor (for single-floor editing)
-            walls={walls}
-            doors={doors}
-            windows={windows}
-            rooms={rooms}
-            closedLoops={closedLoops}
-            materials={materials}
-            furniture={furniture}
-            stairs={stairs}
-            invalidStairIds={invalidStairIds}
-            overlappingFurnIds={overlappingFurnIds}
-            unsupportedWallIds={unsupportedWallIds}
-            // Multi-floor
-            allFloors={floors}
-            activeFloorId={activeFloorId}
-            floorBaseYs={floorBaseYs}
-            showAllFloors={showAllFloors}
-            // UI state
-            selectedId={selectedId}
-            mode={mode}
-            snapRotation={snapRotation}
-            onSelect={handleSelect}
-            onToggleDoor={handleToggleDoor}
-            // Furniture rotate handle (3D) — live/commit
-            onFurnRotateStart={handleFurnRotateStart}
-            onSetFurnitureRotation={handleSetFurnitureRotation}
-            onCommitFurnitureRotation={handleCommitFurnitureRotation}
-          />
+              // Misc
+              onToggleDoor={handleToggleDoor}
+              centerTrigger={canvas2dCenterTrigger}
+            />
+          </div>
+
+          {/* Draggable vertical divider */}
+          {viewportMode === 'split' && (
+            <div
+              className={`vp-divider ${isDraggingSplit ? 'dragging' : ''}`}
+              onMouseDown={handleSplitMouseDown}
+              title="Drag horizontally to resize 2D and 3D views"
+            />
+          )}
+
+          {/* RIGHT — live 3D viewport */}
+          <div
+            className={`panel panel-right vp-pane ${viewportMode === '2d' ? 'vp-pane-hidden' : ''}`}
+            style={
+              viewportMode === 'split'
+                ? { width: `calc(${100 - splitPct}% - 5px)`, flex: '1 1 0%' }
+                : viewportMode === '3d'
+                ? { width: '100%', flex: '1 1 0%' }
+                : { display: 'none' }
+            }
+          >
+            <View3D
+              // Active floor (for single-floor editing)
+              walls={walls}
+              doors={doors}
+              windows={windows}
+              rooms={rooms}
+              closedLoops={closedLoops}
+              materials={materials}
+              furniture={furniture}
+              stairs={stairs}
+              invalidStairIds={invalidStairIds}
+              overlappingFurnIds={overlappingFurnIds}
+              unsupportedWallIds={unsupportedWallIds}
+              // Multi-floor
+              allFloors={floors}
+              activeFloorId={activeFloorId}
+              floorBaseYs={floorBaseYs}
+              showAllFloors={showAllFloors}
+              // UI state
+              selectedId={selectedId}
+              mode={mode}
+              snapRotation={snapRotation}
+              onSelect={handleSelect}
+              onToggleDoor={handleToggleDoor}
+              // Furniture rotate handle (3D) — live/commit
+              onFurnRotateStart={handleFurnRotateStart}
+              onSetFurnitureRotation={handleSetFurnitureRotation}
+              onCommitFurnitureRotation={handleCommitFurnitureRotation}
+            />
+          </div>
+
+          {/* Drag overlay to ensure smooth tracking over canvas/WebGL */}
+          {isDraggingSplit && <div className="vp-drag-overlay" />}
         </div>
 
         {/* SIDEBAR */}
@@ -1020,6 +1337,14 @@ function App() {
 
         {/* Floating debug JSON panel */}
         <DebugPanel data={design} />
+
+        {/* Template Guide Drawer — shown when isGuideOpen=true and a template was loaded */}
+        {isGuideOpen && activeTemplateGuide && (
+          <TemplateGuideDrawer
+            template={activeTemplateGuide}
+            onClose={handleCloseGuide}
+          />
+        )}
       </main>
     </div>
   );

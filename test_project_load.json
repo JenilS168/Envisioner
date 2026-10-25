@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 1,
+  "projectId": "test-save-load-001",
+  "projectName": "Test Multi-Floor House",
+  "units": "meters",
+  "floors": [
+    {
+      "id": "floor-0",
+      "label": "Ground Floor",
+      "walls": [
+        { "id": "wall-1", "start": { "x": 2, "y": 2 }, "end": { "x": 8, "y": 2 }, "height": 3, "thickness": 0.2, "material": { "color": "#d6c2a1", "preset": "plain" } },
+        { "id": "wall-2", "start": { "x": 8, "y": 2 }, "end": { "x": 8, "y": 7 }, "height": 3, "thickness": 0.2, "material": { "color": "#d6c2a1", "preset": "plain" } },
+        { "id": "wall-3", "start": { "x": 8, "y": 7 }, "end": { "x": 2, "y": 7 }, "height": 3, "thickness": 0.2, "material": { "color": "#d6c2a1", "preset": "plain" } },
+        { "id": "wall-4", "start": { "x": 2, "y": 7 }, "end": { "x": 2, "y": 2 }, "height": 3, "thickness": 0.2, "material": { "color": "#d6c2a1", "preset": "plain" } }
+      ],
+      "doors": [
+        { "id": "door-1", "wallId": "wall-1", "position": 0.5, "width": 0.9, "isOpen": false }
+      ],
+      "windows": [
+        { "id": "win-1", "wallId": "wall-2", "position": 0.4, "width": 1.2 }
+      ],
+      "rooms": [
+        {
+          "id": "wall-1,wall-2,wall-3,wall-4",
+          "roof": { "enabled": true, "type": "flat", "height": 0.3, "color": "#555555", "preset": "plain" },
+          "floorColor": "#94a3b8"
+        }
+      ],
+      "materials": {
+        "wallColor": "#d6c2a1",
+        "wallPreset": "plain",
+        "doorFrameColor": "#4b2e1e",
+        "doorPanelColor": "#8b5a2b",
+        "windowFrameColor": "#eeeeee",
+        "windowGlassColor": "#78c7e8",
+        "roofColor": "#555555",
+        "roofPreset": "plain"
+      },
+      "furniture": [
+        { "id": "furn-1", "type": "bed", "x": 5, "y": 4.5, "rotation": 0, "scale": 1.0, "color": "#a0522d", "roomId": "wall-1,wall-2,wall-3,wall-4" }
+      ],
+      "stairs": [
+        { "id": "stair-1", "type": "straight", "fromFloorId": "floor-0", "toFloorId": "floor-1", "x": 3, "y": 3.5, "rotation": 0, "width": 1.0, "run": 3.0, "stepCount": 17, "color": "#8b7355" }
+      ]
+    },
+    {
+      "id": "floor-1",
+      "label": "1st Floor",
+      "walls": [
+        { "id": "wall-5", "start": { "x": 2, "y": 2 }, "end": { "x": 8, "y": 2 }, "height": 3, "thickness": 0.2, "material": { "color": "#c4b08a", "preset": "plain" } },
+        { "id": "wall-6", "start": { "x": 8, "y": 2 }, "end": { "x": 8, "y": 7 }, "height": 3, "thickness": 0.2, "material": { "color": "#c4b08a", "preset": "plain" } },
+        { "id": "wall-7", "start": { "x": 8, "y": 7 }, "end": { "x": 2, "y": 7 }, "height": 3, "thickness": 0.2, "material": { "color": "#c4b08a", "preset": "plain" } },
+        { "id": "wall-8", "start": { "x": 2, "y": 7 }, "end": { "x": 2, "y": 2 }, "height": 3, "thickness": 0.2, "material": { "color": "#c4b08a", "preset": "plain" } }
+      ],
+      "doors": [],
+      "windows": [
+        { "id": "win-2", "wallId": "wall-6", "position": 0.5, "width": 1.0 }
+      ],
+      "rooms": [
+        {
+          "id": "wall-5,wall-6,wall-7,wall-8",
+          "roof": { "enabled": true, "type": "gable", "height": 1.5, "color": "#8B4513", "preset": "plain" },
+          "floorColor": "#b8a090"
+        }
+      ],
+      "materials": {
+        "wallColor": "#c4b08a",
+        "wallPreset": "plain",
+        "doorFrameColor": "#4b2e1e",
+        "doorPanelColor": "#8b5a2b",
+        "windowFrameColor": "#eeeeee",
+        "windowGlassColor": "#78c7e8",
+        "roofColor": "#8B4513",
+        "roofPreset": "plain"
+      },
+      "furniture": [
+        { "id": "furn-2", "type": "sofa", "x": 5, "y": 5, "rotation": 90, "scale": 1.2, "color": "#6b7280", "roomId": "wall-5,wall-6,wall-7,wall-8" },
+        { "id": "furn-3", "type": "table", "x": 6, "y": 3.5, "rotation": 45, "scale": 0.9, "color": "#d97706", "roomId": "wall-5,wall-6,wall-7,wall-8" }
+      ],
+      "stairs": [
+        { "id": "stair-2", "type": "l_shape", "fromFloorId": "floor-1", "toFloorId": "floor-2", "x": 3.5, "y": 4, "rotation": 90, "width": 1.2, "run": 3.5, "landingLength": 1.0, "turnDirection": "left", "stepCount": 18, "color": "#666" }
+      ]
+    },
+    {
+      "id": "floor-2",
+      "label": "2nd Floor",
+      "walls": [],
+      "doors": [],
+      "windows": [],
+      "rooms": [],
+      "materials": {
+        "wallColor": "#d6c2a1",
+        "wallPreset": "plain",
+        "doorFrameColor": "#4b2e1e",
+        "doorPanelColor": "#8b5a2b",
+        "windowFrameColor": "#eeeeee",
+        "windowGlassColor": "#78c7e8",
+        "roofColor": "#555555",
+        "roofPreset": "plain"
+      },
+      "furniture": [],
+      "stairs": []
+    }
+  ],
+  "settings": {},
+  "metadata": {
+    "createdAt": "2025-01-15T10:30:00Z",
+    "updatedAt": "2025-06-20T14:22:00Z"
+  }
+}

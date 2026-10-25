@@ -124,8 +124,88 @@ export default function Canvas2D({
   onCommitStairRotation,
   // Misc
   onToggleDoor,
+  // Auto-center: increment to trigger a fit-to-view of all walls
+  centerTrigger = 0,
 }) {
   const containerRef = useRef(null);
+  // ---- Pan & Zoom state ----
+  const [pan, setPan]   = useState({ x: 0, y: 0 });
+  const [zoom, setZoom] = useState(1.0);
+  const [containerSize, setContainerSize] = useState({ w: 800, h: 600 });
+  const MIN_ZOOM = 0.15;
+  const MAX_ZOOM = 4.0;
+  // Pan-drag internal ref — tracks active middle/right/space+left drag
+  const panDragRef = useRef(null); // { startX, startY, startPanX, startPanY }
+  const spaceHeldRef = useRef(false);
+
+  // Track container size reactively for SVG transform
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        setContainerSize({ w: entry.contentRect.width, h: entry.contentRect.height });
+      }
+    });
+    ro.observe(containerRef.current);
+    return () => ro.disconnect();
+  }, []);
+
+  // Auto-fit: when centerTrigger increments, fit all walls into view with padding
+  useEffect(() => {
+    if (!centerTrigger || walls.length === 0) return;
+    // Wait one frame for container size to settle
+    requestAnimationFrame(() => {
+      const cw = containerRef.current?.getBoundingClientRect().width  || containerSize.w;
+      const ch = containerRef.current?.getBoundingClientRect().height || containerSize.h;
+      // Compute bounding box of all wall endpoints in world metres
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const wall of walls) {
+        minX = Math.min(minX, wall.start.x, wall.end.x);
+        maxX = Math.max(maxX, wall.start.x, wall.end.x);
+        minY = Math.min(minY, wall.start.y, wall.end.y);
+        maxY = Math.max(maxY, wall.start.y, wall.end.y);
+      }
+      const spanX = (maxX - minX) * SCALE;
+      const spanY = (maxY - minY) * SCALE;
+      if (spanX === 0 || spanY === 0) return;
+      // Choose zoom that fits with 15% padding on each side
+      const newZoom = Math.min(
+        MAX_ZOOM,
+        Math.max(MIN_ZOOM, Math.min(
+          (cw * 0.7) / spanX,
+          (ch * 0.7) / spanY,
+        ))
+      );
+      // Pan so the bounding box centre sits at the canvas centre
+      const centreWorldX = (minX + maxX) / 2;
+      const centreWorldY = (minY + maxY) / 2;
+      setZoom(newZoom);
+      setPan({
+        x: -centreWorldX * SCALE * newZoom,
+        y: -centreWorldY * SCALE * newZoom,
+      });
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [centerTrigger]);
+
+  // Keyboard: track spacebar for pan mode
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      if (e.code === 'Space' && e.target === document.body) {
+        spaceHeldRef.current = true;
+        e.preventDefault();
+      }
+    };
+    const onKeyUp = (e) => {
+      if (e.code === 'Space') spaceHeldRef.current = false;
+    };
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+    };
+  }, []);
 
   useEffect(() => {
     function handleBlur() {
@@ -133,6 +213,8 @@ export default function Canvas2D({
       setStartPoint(null);
       setCurrentPoint(null);
       setDragTarget(null);
+      panDragRef.current = null;
+      spaceHeldRef.current = false;
     }
     window.addEventListener('blur', handleBlur);
     return () => window.removeEventListener('blur', handleBlur);
@@ -163,26 +245,67 @@ export default function Canvas2D({
   const [dragTarget, setDragTarget] = useState(null);
 
   // ---------------------------------------------------------------------------
-  // Coordinate helpers
+  // Coordinate helpers — pan/zoom aware
   // ---------------------------------------------------------------------------
-  function getRawCoords(e) {
+  // Returns raw screen pixel position relative to SVG container top-left
+  function getRawScreenCoords(e) {
     if (!containerRef.current) return { rx: 0, ry: 0 };
     const rect = containerRef.current.getBoundingClientRect();
     return { rx: e.clientX - rect.left, ry: e.clientY - rect.top };
   }
-  function getSnappedCoords(e) {
-    const { rx, ry } = getRawCoords(e);
-    return { x: snapCoord(rx), y: snapCoord(ry) };
+  // Convert screen pixel → world metres, accounting for pan + zoom
+  function screenToWorld(screenX, screenY) {
+    if (!containerRef.current) return { x: 0, y: 0 };
+    const rect = containerRef.current.getBoundingClientRect();
+    const cx = rect.width  / 2;
+    const cy = rect.height / 2;
+    const wx = (screenX - cx - pan.x) / (SCALE * zoom);
+    const wy = (screenY - cy - pan.y) / (SCALE * zoom);
+    return { x: wx, y: wy };
+  }
+  // Convert world metres → screen pixel (for hit testing)
+  function worldToScreen(wx, wy) {
+    if (!containerRef.current) return { x: 0, y: 0 };
+    const rect = containerRef.current.getBoundingClientRect();
+    const cx = rect.width  / 2;
+    const cy = rect.height / 2;
+    return {
+      x: wx * SCALE * zoom + cx + pan.x,
+      y: wy * SCALE * zoom + cy + pan.y,
+    };
+  }
+  // Snap world metres to nearest 0.5m grid
+  function snapWorld(wx) { return Math.round(wx / 0.5) * 0.5; }
+  // Convenience: screen → snapped world
+  function getSnappedWorld(e) {
+    const { rx, ry } = getRawScreenCoords(e);
+    const { x, y } = screenToWorld(rx, ry);
+    return { x: snapWorld(x), y: snapWorld(y) };
+  }
+  // Legacy compat — returns snapped screen px (used for drawing wall start/end only)
+  function getRawCoords(e) {
+    const { rx, ry } = getRawScreenCoords(e);
+    return { rx, ry };
   }
 
   // ---------------------------------------------------------------------------
   // Hit-testing helpers
+  // All hit-test helpers work in "display pixel" space = world * SCALE.
+  // Convert screen coords to display-px with: displayX = (screenX - cx - panX) / zoom
   // ---------------------------------------------------------------------------
-  function findNearestWall(rx, ry) {
-    let best = null, bestDist = HIT_THRESHOLD;
+  function screenToDisplayPx(rx, ry) {
+    if (!containerRef.current) return { dpx: rx, dpy: ry };
+    const rect = containerRef.current.getBoundingClientRect();
+    const cx = rect.width  / 2;
+    const cy = rect.height / 2;
+    return { dpx: (rx - cx - pan.x) / zoom, dpy: (ry - cy - pan.y) / zoom };
+  }
+
+  function findNearestWall(dpx, dpy) {
+    let best = null, bestDist = HIT_THRESHOLD / zoom;
     for (const wall of walls) {
       const { distance, t } = pointToSegmentInfo(
-        rx, ry,
+        dpx, dpy,
         wall.start.x * SCALE, wall.start.y * SCALE,
         wall.end.x   * SCALE, wall.end.y   * SCALE,
       );
@@ -191,60 +314,61 @@ export default function Canvas2D({
     return best;
   }
 
-  function findNearestDoor(rx, ry) {
-    let best = null, bestDist = HIT_THRESHOLD + 8;
+  function findNearestDoor(dpx, dpy) {
+    let best = null, bestDist = (HIT_THRESHOLD + 8) / zoom;
     for (const door of doors) {
       const wall = walls.find((w) => w.id === door.wallId);
       if (!wall) continue;
       const cx = wall.start.x * SCALE + door.position * (wall.end.x - wall.start.x) * SCALE;
       const cy = wall.start.y * SCALE + door.position * (wall.end.y - wall.start.y) * SCALE;
-      const dist = Math.hypot(rx - cx, ry - cy);
+      const dist = Math.hypot(dpx - cx, dpy - cy);
       if (dist < bestDist) { bestDist = dist; best = door; }
     }
     return best;
   }
 
-  function findNearestWindow(rx, ry) {
-    let best = null, bestDist = HIT_THRESHOLD + 8;
+  function findNearestWindow(dpx, dpy) {
+    let best = null, bestDist = (HIT_THRESHOLD + 8) / zoom;
     for (const win of windows) {
       const wall = walls.find((w) => w.id === win.wallId);
       if (!wall) continue;
       const cx = wall.start.x * SCALE + win.position * (wall.end.x - wall.start.x) * SCALE;
       const cy = wall.start.y * SCALE + win.position * (wall.end.y - wall.start.y) * SCALE;
-      const dist = Math.hypot(rx - cx, ry - cy);
+      const dist = Math.hypot(dpx - cx, dpy - cy);
       if (dist < bestDist) { bestDist = dist; best = win; }
     }
     return best;
   }
 
-  function findNearestEndpoint(rx, ry) {
+  function findNearestEndpoint(dpx, dpy) {
+    const hitR = ENDPOINT_RADIUS / zoom;
     for (const wall of walls) {
       const sx = wall.start.x * SCALE, sy = wall.start.y * SCALE;
-      if (Math.hypot(rx - sx, ry - sy) < ENDPOINT_RADIUS)
+      if (Math.hypot(dpx - sx, dpy - sy) < hitR)
         return { wallId: wall.id, whichEnd: 'start' };
       const ex = wall.end.x * SCALE, ey = wall.end.y * SCALE;
-      if (Math.hypot(rx - ex, ry - ey) < ENDPOINT_RADIUS)
+      if (Math.hypot(dpx - ex, dpy - ey) < hitR)
         return { wallId: wall.id, whichEnd: 'end' };
     }
     return null;
   }
 
-  function findNearestFurniture(rx, ry) {
+  function findNearestFurniture(dpx, dpy) {
     for (let i = furniture.length - 1; i >= 0; i--) {
       const item = furniture[i];
       const cornersPx = furnitureCorners(item).map((c) => ({ x: c.x * SCALE, y: c.y * SCALE }));
-      if (pointInPolygon({ x: rx, y: ry }, cornersPx)) return item;
+      if (pointInPolygon({ x: dpx, y: dpy }, cornersPx)) return item;
     }
     return null;
   }
 
-  function findNearestStair(rx, ry) {
+  function findNearestStair(dpx, dpy) {
     for (let i = stairs.length - 1; i >= 0; i--) {
       const s = stairs[i];
       const polys = getStairPolygons(s);
       for (const poly of polys) {
         const polyPx = poly.map(p => ({ x: p.x * SCALE, y: p.y * SCALE }));
-        if (pointInPolygon({ x: rx, y: ry }, polyPx)) return s;
+        if (pointInPolygon({ x: dpx, y: dpy }, polyPx)) return s;
       }
     }
     return null;
@@ -259,10 +383,10 @@ export default function Canvas2D({
     };
   }
 
-  function findLoopAtPoint(mx, my) {
+  function findLoopAtPoint(wx, wy) {
     const sorted = [...closedLoops].sort((a, b) => a.area - b.area);
     for (const loop of sorted) {
-      if (pointInPolygon({ x: mx, y: my }, loop.points)) return loop;
+      if (pointInPolygon({ x: wx, y: wy }, loop.points)) return loop;
     }
     return null;
   }
@@ -297,17 +421,52 @@ export default function Canvas2D({
   }
 
   // ---------------------------------------------------------------------------
+  // Wheel handler — zoom toward cursor
+  // ---------------------------------------------------------------------------
+  function handleWheel(e) {
+    e.preventDefault();
+    const { rx, ry } = getRawScreenCoords(e);
+    const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+    setZoom((prevZoom) => {
+      const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, prevZoom * factor));
+      // Adjust pan so the world point under cursor stays fixed
+      if (!containerRef.current) return newZoom;
+      const rect = containerRef.current.getBoundingClientRect();
+      const cx = rect.width / 2;
+      const cy = rect.height / 2;
+      // World point under cursor (before zoom change)
+      const wx = (rx - cx - pan.x) / prevZoom;
+      const wy = (ry - cy - pan.y) / prevZoom;
+      // New pan so same world point maps to same screen position
+      setPan({
+        x: rx - cx - wx * newZoom,
+        y: ry - cy - wy * newZoom,
+      });
+      return newZoom;
+    });
+  }
+
+  // ---------------------------------------------------------------------------
   // Pointer event handlers
   // ---------------------------------------------------------------------------
 
   function handlePointerDown(e) {
-    const { rx, ry } = getRawCoords(e);
+    const { rx, ry } = getRawScreenCoords(e);
+    const { dpx, dpy } = screenToDisplayPx(rx, ry);
+
+    // ---- Pan drag: middle button, right button, or Space+left button ----
+    if (e.button === 1 || e.button === 2 || (e.button === 0 && spaceHeldRef.current)) {
+      e.preventDefault();
+      panDragRef.current = { startX: rx, startY: ry, startPanX: pan.x, startPanY: pan.y };
+      e.target.setPointerCapture(e.pointerId);
+      return;
+    }
 
     // ---- Wall drawing ----
     if (mode === 'wall') {
-      const pt = getSnappedCoords(e);
-      setStartPoint(pt);
-      setCurrentPoint(pt);
+      const w = getSnappedWorld(e);
+      setStartPoint(w);
+      setCurrentPoint(w);
       setIsDrawing(true);
       e.target.setPointerCapture(e.pointerId);
       return;
@@ -315,21 +474,21 @@ export default function Canvas2D({
 
     // ---- Door placement ----
     if (mode === 'door') {
-      const hit = findNearestWall(rx, ry);
+      const hit = findNearestWall(dpx, dpy);
       if (hit) onAddDoor({ wallId: hit.wall.id, position: hit.t, width: 0.9, height: 2.1, isOpen: false });
       return;
     }
 
     // ---- Window placement ----
     if (mode === 'window') {
-      const hit = findNearestWall(rx, ry);
+      const hit = findNearestWall(dpx, dpy);
       if (hit) onAddWindow({ wallId: hit.wall.id, position: hit.t, width: 1.2, height: 1.0, sillHeight: 1.0 });
       return;
     }
 
     // ---- Furniture placement ----
     if (mode === 'furniture') {
-      const mx = rx / SCALE, my = ry / SCALE;
+      const { x: mx, y: my } = screenToWorld(rx, ry);
       const loop = findLoopAtPoint(mx, my);
       if (loop && onAddFurniture) {
         const cat = FURNITURE_CATALOG[selectedFurnitureType] || FURNITURE_CATALOG.table;
@@ -340,7 +499,7 @@ export default function Canvas2D({
 
     // ---- Stair placement ----
     if (mode === 'stairs') {
-      const mx = rx / SCALE, my = ry / SCALE;
+      const { x: mx, y: my } = screenToWorld(rx, ry);
       const loop = findLoopAtPoint(mx, my);
       if (loop && onAddStair) {
         onAddStair({ type: selectedStairType, x: mx, y: my, rotation: 0, width: 1.1, run: 3.0, landingLength: 1.1, turnDirection: 'left', color: '#8b6b45' });
@@ -355,7 +514,7 @@ export default function Canvas2D({
         const selFurn = furniture.find((f) => f.id === selectedId);
         if (selFurn) {
           const hp = getRotateHandlePixelPos(selFurn);
-          if (Math.hypot(rx - hp.x, ry - hp.y) <= ROTATE_HANDLE_HIT) {
+          if (Math.hypot(dpx - hp.x, dpy - hp.y) <= ROTATE_HANDLE_HIT / zoom) {
             // Snapshot BEFORE starting the rotate drag
             onFurnRotateStart && onFurnRotateStart();
             const itemCx = selFurn.x * SCALE;
@@ -363,7 +522,7 @@ export default function Canvas2D({
             setDragTarget({
               type:               'furniture-rotate',
               furnitureId:         selFurn.id,
-              startAngleDeg:       Math.atan2(ry - itemCy, rx - itemCx) * 180 / Math.PI,
+              startAngleDeg:       Math.atan2(dpy - itemCy, dpx - itemCx) * 180 / Math.PI,
               itemStartRotation:   selFurn.rotation ?? 0,
               latestDeg:           selFurn.rotation ?? 0,
             });
@@ -376,14 +535,14 @@ export default function Canvas2D({
         const selStair = stairs.find((s) => s.id === selectedId);
         if (selStair) {
           const hp = getStairRotateHandlePixelPos(selStair);
-          if (Math.hypot(rx - hp.x, ry - hp.y) <= ROTATE_HANDLE_HIT) {
+          if (Math.hypot(dpx - hp.x, dpy - hp.y) <= ROTATE_HANDLE_HIT / zoom) {
             onStairRotateStart && onStairRotateStart();
             const itemCx = selStair.x * SCALE;
             const itemCy = selStair.y * SCALE;
             setDragTarget({
               type:               'stair-rotate',
               stairId:            selStair.id,
-              startAngleDeg:       Math.atan2(ry - itemCy, rx - itemCx) * 180 / Math.PI,
+              startAngleDeg:       Math.atan2(dpy - itemCy, dpx - itemCx) * 180 / Math.PI,
               itemStartRotation:   selStair.rotation ?? 0,
               latestDeg:           selStair.rotation ?? 0,
             });
@@ -393,7 +552,7 @@ export default function Canvas2D({
         }
 
         // Wall endpoint drag
-        const ep = findNearestEndpoint(rx, ry);
+        const ep = findNearestEndpoint(dpx, dpy);
         if (ep && ep.wallId === selectedId) {
           // Snapshot BEFORE endpoint drag
           onEndpointStart && onEndpointStart();
@@ -404,7 +563,7 @@ export default function Canvas2D({
       }
 
       // 1. Door
-      const doorHit = findNearestDoor(rx, ry);
+      const doorHit = findNearestDoor(dpx, dpy);
       if (doorHit) {
         onSelect(doorHit.id);
         // Snapshot BEFORE door drag
@@ -415,7 +574,7 @@ export default function Canvas2D({
       }
 
       // 2. Window
-      const winHit = findNearestWindow(rx, ry);
+      const winHit = findNearestWindow(dpx, dpy);
       if (winHit) {
         onSelect(winHit.id);
         // Snapshot BEFORE window drag
@@ -426,7 +585,7 @@ export default function Canvas2D({
       }
 
       // 3. Furniture body
-      const furnHit = findNearestFurniture(rx, ry);
+      const furnHit = findNearestFurniture(dpx, dpy);
       if (furnHit) {
         onSelect(furnHit.id);
         // Snapshot BEFORE furniture move drag
@@ -434,8 +593,8 @@ export default function Canvas2D({
         setDragTarget({
           type:        'furniture',
           furnitureId: furnHit.id,
-          offsetX:     furnHit.x - rx / SCALE,
-          offsetY:     furnHit.y - ry / SCALE,
+          offsetX:     furnHit.x - screenToWorld(rx, ry).x,
+          offsetY:     furnHit.y - screenToWorld(rx, ry).y,
           latestX:     furnHit.x,
           latestY:     furnHit.y,
         });
@@ -444,14 +603,14 @@ export default function Canvas2D({
       }
 
       // 3.5 Stair body
-      const stairHit = findNearestStair(rx, ry);
+      const stairHit = findNearestStair(dpx, dpy);
       if (stairHit) {
         onSelect(stairHit.id);
         onStairMoveStart && onStairMoveStart();
         setDragTarget({
           type: 'stair', stairId: stairHit.id,
-          offsetX: stairHit.x - rx / SCALE,
-          offsetY: stairHit.y - ry / SCALE,
+          offsetX: stairHit.x - screenToWorld(rx, ry).x,
+          offsetY: stairHit.y - screenToWorld(rx, ry).y,
           latestX: stairHit.x, latestY: stairHit.y,
         });
         e.target.setPointerCapture(e.pointerId);
@@ -459,10 +618,10 @@ export default function Canvas2D({
       }
 
       // 4. Wall
-      const wallHit = findNearestWall(rx, ry);
+      const wallHit = findNearestWall(dpx, dpy);
       if (wallHit) {
         onSelect(wallHit.wall.id);
-        const ep = findNearestEndpoint(rx, ry);
+        const ep = findNearestEndpoint(dpx, dpy);
         if (ep && ep.wallId === wallHit.wall.id) {
           onEndpointStart && onEndpointStart();
           setDragTarget({ type: 'endpoint', wallId: ep.wallId, whichEnd: ep.whichEnd, latestCoords: null });
@@ -472,9 +631,10 @@ export default function Canvas2D({
       }
 
       // 5. Room floor
+      const { x: wx5, y: wy5 } = screenToWorld(rx, ry);
       const sortedLoops = [...closedLoops].sort((a, b) => a.area - b.area);
       for (const loop of sortedLoops) {
-        if (pointInPolygon({ x: rx / SCALE, y: ry / SCALE }, loop.points)) {
+        if (pointInPolygon({ x: wx5, y: wy5 }, loop.points)) {
           onSelect(loop.id);
           return;
         }
@@ -486,21 +646,29 @@ export default function Canvas2D({
   }
 
   function handlePointerMove(e) {
-    const { rx, ry } = getRawCoords(e);
+    const { rx, ry } = getRawScreenCoords(e);
+    const { dpx, dpy } = screenToDisplayPx(rx, ry);
+
+    // ---- Pan drag ----
+    if (panDragRef.current) {
+      const { startX, startY, startPanX, startPanY } = panDragRef.current;
+      setPan({ x: startPanX + (rx - startX), y: startPanY + (ry - startY) });
+      return;
+    }
 
     if (mode === 'wall' && isDrawing) {
-      setCurrentPoint(getSnappedCoords(e));
+      setCurrentPoint(getSnappedWorld(e));
       return;
     }
 
     if (mode === 'door' || mode === 'window') {
-      const hit = findNearestWall(rx, ry);
+      const hit = findNearestWall(dpx, dpy);
       setHoveredWallId(hit ? hit.wall.id : null);
       return;
     }
 
     if (mode === 'furniture') {
-      const mx = rx / SCALE, my = ry / SCALE;
+      const { x: mx, y: my } = screenToWorld(rx, ry);
       const loop = findLoopAtPoint(mx, my);
       setGhostPos({ x: mx, y: my });
       setGhostLoopId(loop ? loop.id : null);
@@ -508,7 +676,7 @@ export default function Canvas2D({
     }
 
     if (mode === 'stairs') {
-      const mx = rx / SCALE, my = ry / SCALE;
+      const { x: mx, y: my } = screenToWorld(rx, ry);
       const loop = findLoopAtPoint(mx, my);
       setGhostPos({ x: mx, y: my });
       setGhostLoopId(loop ? loop.id : null);
@@ -521,7 +689,7 @@ export default function Canvas2D({
         if (!door) return;
         const wall = walls.find((w) => w.id === door.wallId);
         if (!wall) return;
-        const { t: rawT } = pointToSegmentInfo(rx, ry,
+        const { t: rawT } = pointToSegmentInfo(dpx, dpy,
           wall.start.x * SCALE, wall.start.y * SCALE,
           wall.end.x * SCALE, wall.end.y * SCALE);
         const clamped = clampOpeningPosition(door.id, door.wallId, rawT, door.width);
@@ -534,7 +702,7 @@ export default function Canvas2D({
         if (!win) return;
         const wall = walls.find((w) => w.id === win.wallId);
         if (!wall) return;
-        const { t: rawT } = pointToSegmentInfo(rx, ry,
+        const { t: rawT } = pointToSegmentInfo(dpx, dpy,
           wall.start.x * SCALE, wall.start.y * SCALE,
           wall.end.x * SCALE, wall.end.y * SCALE);
         const clamped = clampOpeningPosition(win.id, win.wallId, rawT, win.width);
@@ -543,17 +711,17 @@ export default function Canvas2D({
         setDragTarget((prev) => ({ ...prev, latestPosition: clamped }));
 
       } else if (dragTarget.type === 'endpoint') {
-        const snapped = getSnappedCoords(e);
-        const newCoords = { x: snapped.x / SCALE, y: snapped.y / SCALE };
+        const snapped = getSnappedWorld(e);
         // Live update — no history
-        onMoveWallEndpoint && onMoveWallEndpoint(dragTarget.wallId, dragTarget.whichEnd, newCoords);
-        setDragTarget((prev) => ({ ...prev, latestCoords: newCoords }));
+        onMoveWallEndpoint && onMoveWallEndpoint(dragTarget.wallId, dragTarget.whichEnd, snapped);
+        setDragTarget((prev) => ({ ...prev, latestCoords: snapped }));
 
       } else if (dragTarget.type === 'furniture') {
         const item = furniture.find((f) => f.id === dragTarget.furnitureId);
         if (!item) return;
-        const proposedX = rx / SCALE + dragTarget.offsetX;
-        const proposedY = ry / SCALE + dragTarget.offsetY;
+        const { x: mx, y: my } = screenToWorld(rx, ry);
+        const proposedX = mx + dragTarget.offsetX;
+        const proposedY = my + dragTarget.offsetY;
         const loop = closedLoops.find((l) => l.id === item.roomId);
         if (!loop) return;
         if (allCornersInLoop(proposedX, proposedY, item.rotation ?? 0, item.scale ?? 1.0, item.type, loop)) {
@@ -567,7 +735,7 @@ export default function Canvas2D({
         if (!item) return;
         const itemCx = item.x * SCALE;
         const itemCy = item.y * SCALE;
-        const currentAngleDeg = Math.atan2(ry - itemCy, rx - itemCx) * 180 / Math.PI;
+        const currentAngleDeg = Math.atan2(dpy - itemCy, dpx - itemCx) * 180 / Math.PI;
         const deltaAngle = currentAngleDeg - dragTarget.startAngleDeg;
         let newRotation = ((dragTarget.itemStartRotation + deltaAngle) % 360 + 360) % 360;
         if (snapRotation) newRotation = (Math.round(newRotation / 15) * 15) % 360;
@@ -581,23 +749,24 @@ export default function Canvas2D({
       } else if (dragTarget.type === 'stair') {
         const item = stairs.find((s) => s.id === dragTarget.stairId);
         if (!item) return;
-        const proposedX = rx / SCALE + dragTarget.offsetX;
-        const proposedY = ry / SCALE + dragTarget.offsetY;
-        
+        const { x: mx, y: my } = screenToWorld(rx, ry);
+        const proposedX = mx + dragTarget.offsetX;
+        const proposedY = my + dragTarget.offsetY;
+
         // Live update — stairs are not physically clamped, just visually marked invalid later
         onMoveStair && onMoveStair(item.id, proposedX, proposedY);
         setDragTarget((prev) => ({ ...prev, latestX: proposedX, latestY: proposedY }));
-        
+
       } else if (dragTarget.type === 'stair-rotate') {
         const item = stairs.find((s) => s.id === dragTarget.stairId);
         if (!item) return;
         const itemCx = item.x * SCALE;
         const itemCy = item.y * SCALE;
-        const currentAngleDeg = Math.atan2(ry - itemCy, rx - itemCx) * 180 / Math.PI;
+        const currentAngleDeg = Math.atan2(dpy - itemCy, dpx - itemCx) * 180 / Math.PI;
         const deltaAngle = currentAngleDeg - dragTarget.startAngleDeg;
         let newRotation = ((dragTarget.itemStartRotation + deltaAngle) % 360 + 360) % 360;
         if (snapRotation) newRotation = (Math.round(newRotation / 15) * 15) % 360;
-        
+
         onSetStairRotation && onSetStairRotation(item.id, newRotation);
         setDragTarget((prev) => ({ ...prev, latestDeg: newRotation }));
       }
@@ -608,14 +777,21 @@ export default function Canvas2D({
     if (e.target.hasPointerCapture && e.target.hasPointerCapture(e.pointerId)) {
       e.target.releasePointerCapture(e.pointerId);
     }
+
+    // ---- Stop pan drag ----
+    if (panDragRef.current) {
+      panDragRef.current = null;
+      return;
+    }
+
     // ---- Wall drawing commit ----
     if (mode === 'wall' && isDrawing) {
       setIsDrawing(false);
-      const endPt = getSnappedCoords(e);
+      const endPt = getSnappedWorld(e);
       if (startPoint && (startPoint.x !== endPt.x || startPoint.y !== endPt.y)) {
         onAddWall({
-          start: { x: startPoint.x / SCALE, y: startPoint.y / SCALE },
-          end:   { x: endPt.x / SCALE, y: endPt.y / SCALE },
+          start: { x: startPoint.x, y: startPoint.y },
+          end:   { x: endPt.x,      y: endPt.y },
           height: 3, thickness: 0.2,
         });
       }
@@ -687,15 +863,15 @@ export default function Canvas2D({
     const iconW  = door.width * SCALE;
     const iconH  = 16;
     const isSelected = door.id === selectedId;
-    const strokeColor = isSelected ? '#22c55e' : '#f59e0b';
-    const fillColor   = isSelected ? 'rgba(34,197,94,0.15)' : '#0f172a';
+    const strokeColor = isSelected ? '#14B8A6' : '#f59e0b';
+    const fillColor   = isSelected ? 'rgba(20, 184, 166, 0.15)' : '#181A1F';
     const arcAngle    = door.isOpen ? Math.PI / 2 : Math.PI / 3;
     const arcEndX     = -iconW / 2 + iconW * Math.cos(arcAngle);
     const arcEndY     = (iconW / 2) * Math.sin(arcAngle);
     return (
       <g key={key} transform={`translate(${cx},${cy}) rotate(${angle})`}>
         {isSelected && (
-          <circle r={iconW / 2 + 6} fill="none" stroke="#22c55e"
+          <circle r={iconW / 2 + 6} fill="none" stroke="#14B8A6"
             strokeWidth={2} strokeDasharray="4 3" opacity={0.6} />
         )}
         <rect x={-iconW/2} y={-iconH/2} width={iconW} height={iconH}
@@ -721,12 +897,12 @@ export default function Canvas2D({
     const iconW  = win.width * SCALE;
     const iconH  = 14;
     const isSelected = win.id === selectedId;
-    const strokeColor = isSelected ? '#22c55e' : '#38bdf8';
-    const fillColor   = isSelected ? 'rgba(34,197,94,0.15)' : 'rgba(56,189,248,0.15)';
+    const strokeColor = isSelected ? '#14B8A6' : '#38bdf8';
+    const fillColor   = isSelected ? 'rgba(20, 184, 166, 0.15)' : 'rgba(56,189,248,0.15)';
     return (
       <g key={key} transform={`translate(${cx},${cy}) rotate(${angle})`}>
         {isSelected && (
-          <circle r={iconW / 2 + 6} fill="none" stroke="#22c55e"
+          <circle r={iconW / 2 + 6} fill="none" stroke="#14B8A6"
             strokeWidth={2} strokeDasharray="4 3" opacity={0.6} />
         )}
         <rect x={-iconW/2} y={-iconH/2} width={iconW} height={iconH}
@@ -749,7 +925,7 @@ export default function Canvas2D({
     const baseColor = item.color || FURNITURE_CATALOG[item.type]?.color || '#888888';
     const label    = FURNITURE_LABELS[item.type] || item.type.slice(0, 4).toUpperCase();
     const fontSize = Math.max(7, Math.min(pw, ph) * 0.28);
-    const stroke      = isOverlapping ? '#ef4444' : isSelected ? '#22c55e' : 'rgba(255,255,255,0.35)';
+    const stroke      = isOverlapping ? '#EF4444' : isSelected ? '#14B8A6' : 'rgba(255,255,255,0.35)';
     const strokeWidth = isOverlapping ? 3 : isSelected ? 2.5 : 1;
     const handleOffsetPx = ph / 2 + ROTATE_HANDLE_OFFSET;
     return (
@@ -759,11 +935,11 @@ export default function Canvas2D({
           stroke={stroke} strokeWidth={strokeWidth} rx={3} />
         {isSelected && !isOverlapping && (
           <rect x={-pw/2-4} y={-ph/2-4} width={pw+8} height={ph+8}
-            fill="none" stroke="#22c55e" strokeWidth={1.5} strokeDasharray="5 3" rx={4} opacity={0.65} />
+            fill="none" stroke="#14B8A6" strokeWidth={1.5} strokeDasharray="5 3" rx={4} opacity={0.65} />
         )}
         {isOverlapping && (
           <rect x={-pw/2-4} y={-ph/2-4} width={pw+8} height={ph+8}
-            fill="none" stroke="#ef4444" strokeWidth={2} strokeDasharray="5 3" rx={4} opacity={0.75} />
+            fill="none" stroke="#EF4444" strokeWidth={2} strokeDasharray="5 3" rx={4} opacity={0.75} />
         )}
         <text x={0} y={fontSize * 0.38} textAnchor="middle" fontSize={fontSize}
           fill="rgba(255,255,255,0.9)" fontWeight="700" fontFamily="system-ui, sans-serif"
@@ -773,12 +949,12 @@ export default function Canvas2D({
         {isSelected && mode === 'select' && (
           <>
             <line x1={0} y1={-ph/2} x2={0} y2={-handleOffsetPx}
-              stroke="#a78bfa" strokeWidth={1.5} strokeDasharray="3 3"
+              stroke="#14B8A6" strokeWidth={1.5} strokeDasharray="3 3"
               style={{ pointerEvents: 'none' }} />
             <circle cx={0} cy={-handleOffsetPx} r={7}
-              fill="#a78bfa" fillOpacity={0.9} stroke="white" strokeWidth={1.5}
+              fill="#14B8A6" fillOpacity={0.9} stroke="white" strokeWidth={1.5}
               style={{ cursor: 'grab' }} />
-            <text x={11} y={-handleOffsetPx+4} fontSize={9} fill="#a78bfa"
+            <text x={11} y={-handleOffsetPx+4} fontSize={9} fill="#14B8A6"
               fontFamily="system-ui, sans-serif"
               style={{ pointerEvents: 'none', userSelect: 'none' }}>
               {Math.round(rotDeg)}°
@@ -810,16 +986,16 @@ export default function Canvas2D({
           return (
             <polygon key={idx} points={pts}
               fill={item.color || '#8b6b45'} fillOpacity={isSelected ? 0.92 : 0.72}
-              stroke={isInvalid ? '#ef4444' : isSelected ? '#22c55e' : 'rgba(255,255,255,0.35)'}
+              stroke={isInvalid ? '#EF4444' : isSelected ? '#14B8A6' : 'rgba(255,255,255,0.35)'}
               strokeWidth={isInvalid ? 3 : isSelected ? 2.5 : 1}
             />
           );
         })}
         {isSelected && mode === 'select' && (
           <g transform={`translate(${item.x * SCALE}, ${item.y * SCALE}) rotate(${rotDeg})`}>
-            <line x1={0} y1={-((item.run ?? 3) * SCALE)/2} x2={0} y2={-handleOffsetPx} stroke="#a78bfa" strokeWidth={1.5} strokeDasharray="3 3" />
-            <circle cx={0} cy={-handleOffsetPx} r={7} fill="#a78bfa" fillOpacity={0.9} stroke="white" strokeWidth={1.5} style={{ cursor: 'grab' }} />
-            <text x={11} y={-handleOffsetPx+4} fontSize={9} fill="#a78bfa" fontFamily="system-ui, sans-serif" style={{ pointerEvents: 'none', userSelect: 'none' }}>
+            <line x1={0} y1={-((item.run ?? 3) * SCALE)/2} x2={0} y2={-handleOffsetPx} stroke="#14B8A6" strokeWidth={1.5} strokeDasharray="3 3" />
+            <circle cx={0} cy={-handleOffsetPx} r={7} fill="#14B8A6" fillOpacity={0.9} stroke="white" strokeWidth={1.5} style={{ cursor: 'grab' }} />
+            <text x={11} y={-handleOffsetPx+4} fontSize={9} fill="#14B8A6" fontFamily="system-ui, sans-serif" style={{ pointerEvents: 'none', userSelect: 'none' }}>
               {Math.round(rotDeg)}°
             </text>
           </g>
@@ -849,8 +1025,8 @@ export default function Canvas2D({
 
       return (
         <rect x={ghostPos.x * SCALE - pw/2} y={ghostPos.y * SCALE - ph/2}
-          width={pw} height={ph} fill={isGhostInvalid ? '#ef4444' : cat.color} fillOpacity={0.28}
-          stroke={isGhostInvalid ? '#ef4444' : cat.color} strokeWidth={1.5} strokeDasharray="6 3" rx={3}
+          width={pw} height={ph} fill={isGhostInvalid ? '#EF4444' : cat.color} fillOpacity={0.28}
+          stroke={isGhostInvalid ? '#EF4444' : cat.color} strokeWidth={1.5} strokeDasharray="6 3" rx={3}
           style={{ pointerEvents: 'none' }} />
       );
     }
@@ -894,8 +1070,8 @@ export default function Canvas2D({
             const pts = poly.map(p => `${p.x * SCALE},${p.y * SCALE}`).join(' ');
             return (
               <polygon key={idx} points={pts}
-                fill={isGhostInvalid ? '#ef4444' : '#8b6b45'} fillOpacity={0.28}
-                stroke={isGhostInvalid ? '#ef4444' : '#8b6b45'} strokeWidth={1.5} strokeDasharray="6 3"
+                fill={isGhostInvalid ? '#EF4444' : '#8b6b45'} fillOpacity={0.28}
+                stroke={isGhostInvalid ? '#EF4444' : '#8b6b45'} strokeWidth={1.5} strokeDasharray="6 3"
               />
             );
           })}
@@ -920,9 +1096,15 @@ export default function Canvas2D({
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerCancel}
-      style={{ touchAction: 'none', cursor: cursorStyle }}>
+      onWheel={handleWheel}
+      onContextMenu={(e) => e.preventDefault()}
+      style={{ touchAction: 'none', cursor:
+        panDragRef.current ? 'grabbing' :
+        (spaceHeldRef.current ? 'grab' : cursorStyle),
+        position: 'relative', overflow: 'hidden' }}>
       <svg width="100%" height="100%" style={{ display: 'block' }}>
-
+        {/* Single transform group — all draw coords in world*SCALE space */}
+        <g transform={`translate(${containerSize.w / 2 + pan.x}, ${containerSize.h / 2 + pan.y}) scale(${zoom})`}>
         {/* ---- Below-floor reference guide (non-interactive, faded grey dashes) ---- */}
         {!isGroundFloor && belowFloorWalls.map((wall) => (
           <line
@@ -942,7 +1124,7 @@ export default function Canvas2D({
         {closedLoops.map((loop) => (
           <polygon key={loop.id}
             points={loop.points.map((p) => `${p.x * SCALE},${p.y * SCALE}`).join(' ')}
-            fill={loop.id === selectedId ? 'rgba(34,197,94,0.08)' : 'rgba(255,255,255,0.03)'}
+            fill={loop.id === selectedId ? 'rgba(20, 184, 166, 0.12)' : 'rgba(255,255,255,0.03)'}
             stroke="none" style={{ pointerEvents: 'none' }} />
         ))}
 
@@ -960,8 +1142,8 @@ export default function Canvas2D({
           const isSel = wall.id === selectedId;
           const isHov = wall.id === hoveredWallId;
           const isUnsupported = unsupportedWallIds.has(wall.id);
-          const baseColor = wall.material?.color || materials.wallColor || '#3b82f6';
-          const stroke = isSel ? '#22c55e' : isHov ? '#f59e0b' : baseColor;
+          const baseColor = wall.material?.color || materials.wallColor || '#E5E7EB';
+          const stroke = isSel ? '#14B8A6' : isHov ? '#0D9488' : baseColor;
           return (
             <React.Fragment key={wall.id}>
               {/* Unsupported-wall warning outline — drawn behind the wall line */}
@@ -969,7 +1151,7 @@ export default function Canvas2D({
                 <line
                   x1={wall.start.x * SCALE} y1={wall.start.y * SCALE}
                   x2={wall.end.x   * SCALE} y2={wall.end.y   * SCALE}
-                  stroke="#f97316"
+                  stroke="#EF4444"
                   strokeWidth={(wall.thickness ?? 0.2) * SCALE + 6}
                   strokeLinecap="round"
                   strokeDasharray="7 4"
@@ -990,7 +1172,7 @@ export default function Canvas2D({
         {walls.map((wall) => {
           const isSel = wall.id === selectedId;
           const r = isSel ? 6 : 4;
-          const fill = isSel ? '#22c55e' : '#ffffff';
+          const fill = isSel ? '#14B8A6' : '#ffffff';
           return (
             <React.Fragment key={`ep-${wall.id}`}>
               <circle cx={wall.start.x * SCALE} cy={wall.start.y * SCALE} r={r} fill={fill} />
@@ -999,10 +1181,12 @@ export default function Canvas2D({
           );
         })}
 
-        {/* Wall-draw preview */}
+        {/* Wall-draw preview — coords in world metres → display pixels */}
         {isDrawing && startPoint && currentPoint && (
-          <line x1={startPoint.x} y1={startPoint.y} x2={currentPoint.x} y2={currentPoint.y}
-            stroke="#60a5fa" strokeWidth={0.2 * SCALE} strokeLinecap="round" strokeDasharray="4 4"
+          <line
+            x1={startPoint.x * SCALE} y1={startPoint.y * SCALE}
+            x2={currentPoint.x * SCALE} y2={currentPoint.y * SCALE}
+            stroke="#14B8A6" strokeWidth={0.2 * SCALE} strokeLinecap="round" strokeDasharray="4 4"
             style={{ pointerEvents: 'none' }} />
         )}
 
@@ -1012,7 +1196,50 @@ export default function Canvas2D({
         {/* Windows */}
         {windows.map((win, idx) => renderWindowIcon(win, `win-${win.id ?? idx}`))}
 
+        </g>{/* end pan/zoom group */}
       </svg>
+
+      {/* ---- Floating zoom mini-controls ---- */}
+      <div style={{
+        position: 'absolute', bottom: 12, left: 12,
+        display: 'flex', flexDirection: 'column', gap: 4,
+        zIndex: 10,
+      }}>
+        <button
+          id="canvas2d-zoom-in"
+          title="Zoom In"
+          onClick={() => setZoom(z => Math.min(MAX_ZOOM, z * 1.25))}
+          style={{
+            width: 28, height: 28, borderRadius: 6, border: '1px solid var(--border)',
+            background: 'var(--bg-surface-elevated)', color: 'var(--text-primary)',
+            fontSize: 16, lineHeight: 1, cursor: 'pointer', display: 'flex',
+            alignItems: 'center', justifyContent: 'center',
+          }}>+</button>
+        <button
+          id="canvas2d-zoom-out"
+          title="Zoom Out"
+          onClick={() => setZoom(z => Math.max(MIN_ZOOM, z / 1.25))}
+          style={{
+            width: 28, height: 28, borderRadius: 6, border: '1px solid var(--border)',
+            background: 'var(--bg-surface-elevated)', color: 'var(--text-primary)',
+            fontSize: 16, lineHeight: 1, cursor: 'pointer', display: 'flex',
+            alignItems: 'center', justifyContent: 'center',
+          }}>−</button>
+        <button
+          id="canvas2d-zoom-reset"
+          title="Reset View (Fit)"
+          onClick={() => { setPan({ x: 0, y: 0 }); setZoom(1.0); }}
+          style={{
+            width: 28, height: 28, borderRadius: 6, border: '1px solid var(--border)',
+            background: 'var(--bg-surface-elevated)', color: 'var(--text-primary)',
+            fontSize: 11, lineHeight: 1, cursor: 'pointer', display: 'flex',
+            alignItems: 'center', justifyContent: 'center',
+          }}>⌂</button>
+        <span style={{
+          fontSize: 9, color: 'var(--text-muted)', textAlign: 'center',
+          lineHeight: 1.2, userSelect: 'none',
+        }}>{Math.round(zoom * 100)}%</span>
+      </div>
     </div>
   );
 }

@@ -89,7 +89,7 @@ export function migrateToFloors(oldDesign) {
  * Ensures a floor object has all required array/material keys.
  * Defensive: old saves of a partially-defined floor won't crash.
  */
-function normaliseFloor(floor) {
+export function normaliseFloor(floor) {
   return {
     ...floor,
     walls:     floor.walls     || [],

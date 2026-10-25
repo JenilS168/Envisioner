@@ -60,7 +60,38 @@ export function computePolygonBounds(points) {
 }
 
 /**
+ * Checks if point P (given as vertex index pIdx) lies strictly on the segment
+ * between vertices[u] and vertices[v] (not at the endpoints), within tolerance.
+ * Returns the parametric t ∈ (0,1) along the segment, or -1 if not on segment.
+ */
+function pointOnSegmentT(vertices, pIdx, u, v, tolerance) {
+  const p  = vertices[pIdx];
+  const a  = vertices[u];
+  const b  = vertices[v];
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq < 1e-10) return -1; // degenerate edge
+
+  // Project p onto line AB
+  const t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq;
+  if (t <= tolerance / Math.sqrt(lenSq) || t >= 1 - tolerance / Math.sqrt(lenSq)) {
+    return -1; // at or beyond endpoint — not a T-junction
+  }
+
+  // Check perpendicular distance
+  const projX = a.x + t * dx;
+  const projY = a.y + t * dy;
+  const distSq = (p.x - projX) * (p.x - projX) + (p.y - projY) * (p.y - projY);
+  return distSq <= tolerance * tolerance ? t : -1;
+}
+
+/**
  * Detects closed loops from wall segments.
+ *
+ * Handles T-junctions: when a wall endpoint lies on another wall's segment
+ * (but not at its endpoints), that segment is split at the junction so the
+ * interior room is part of the graph and can form a valid closed loop.
  *
  * @param {Array} walls - Array of wall objects with start: {x,y} and end: {x,y}
  * @param {number} tolerance - Snapping distance in meters (default 0.15m)
@@ -71,7 +102,7 @@ export function findClosedLoops(walls, tolerance = 0.15) {
 
   // 1. Build unique vertices
   const vertices = [];
-  const edges = []; // { u, v, wallId }
+  let edges = []; // { u, v, wallId }
 
   for (const wall of walls) {
     if (!wall.start || !wall.end) continue;
@@ -84,6 +115,39 @@ export function findClosedLoops(walls, tolerance = 0.15) {
 
   if (vertices.length < 3 || edges.length < 3) return [];
 
+  // 1b. T-junction splitting: for every vertex P, check if it lies strictly
+  //     on any edge (u→v) that does not already include P as an endpoint.
+  //     If so, split that edge into (u→P) and (P→v).
+  //     Iterate until stable (a single pass can miss cascading junctions).
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const nextEdges = [];
+    for (const edge of edges) {
+      const { u, v, wallId } = edge;
+      let splitAt = -1;
+      let splitT   = Infinity;
+      // Check every vertex against this edge; split at the nearest junction
+      for (let pIdx = 0; pIdx < vertices.length; pIdx++) {
+        if (pIdx === u || pIdx === v) continue;
+        const t = pointOnSegmentT(vertices, pIdx, u, v, tolerance);
+        if (t > 0 && t < splitT) {
+          splitT  = t;
+          splitAt = pIdx;
+        }
+      }
+      if (splitAt >= 0) {
+        // Split this edge at the junction vertex
+        nextEdges.push({ u, v: splitAt, wallId });
+        nextEdges.push({ u: splitAt, v, wallId });
+        changed = true;
+      } else {
+        nextEdges.push(edge);
+      }
+    }
+    edges = nextEdges;
+  }
+
   // 2. Build adjacency list
   const adj = Array.from({ length: vertices.length }, () => []);
   for (let i = 0; i < edges.length; i++) {
@@ -92,22 +156,34 @@ export function findClosedLoops(walls, tolerance = 0.15) {
     adj[v].push({ to: u, edgeIdx: i, wallId });
   }
 
-  // 3. Find simple cycles using DFS
+  // 3. Find simple cycles using bounded DFS.
+  //
+  // For each start vertex we run an edge-backtracking DFS to find all simple
+  // cycles reachable from it. Two bounding measures keep runtime practical:
+  //   • path length cap of 12: rooms with >12 corners are unrealistic and the
+  //     cap prevents the combinatorial blowup on dense graphs.
+  //   • global cycle cap of 600: once we have found this many raw candidate
+  //     cycles the dedup/area filters in step 4 will select the primitives;
+  //     we stop early rather than enumerate every compound spanning loop.
+  // For typical floor plans (≤15 walls, ≤4 rooms per floor) performance is
+  // well under 1 ms. The cap only kicks in for pathological dense grids that
+  // no user would draw manually.
+  const MAX_PATH   = 12;  // max vertices in a cycle (including start)
+  const MAX_CYCLES = 600; // global cap to prevent exponential blowup
   const foundCycles = [];
 
   function dfs(startNode, currNode, visitedEdges, path, wallPath) {
+    if (foundCycles.length >= MAX_CYCLES) return;
     for (const { to, edgeIdx, wallId } of adj[currNode]) {
+      if (foundCycles.length >= MAX_CYCLES) return;
       if (visitedEdges.has(edgeIdx)) continue;
 
       if (to === startNode && path.length >= 3) {
-        // Closed cycle found!
-        const cycle = [...path];
-        const cycleWalls = [...wallPath, wallId];
-        foundCycles.push({ cycle, cycleWalls });
+        foundCycles.push({ cycle: [...path], cycleWalls: [...wallPath, wallId] });
         continue;
       }
 
-      if (!path.includes(to) && path.length < 20) {
+      if (!path.includes(to) && path.length < MAX_PATH) {
         visitedEdges.add(edgeIdx);
         path.push(to);
         wallPath.push(wallId);
@@ -120,10 +196,13 @@ export function findClosedLoops(walls, tolerance = 0.15) {
   }
 
   for (let i = 0; i < vertices.length; i++) {
+    if (foundCycles.length >= MAX_CYCLES) break;
     if (adj[i].length >= 2) {
       dfs(i, i, new Set(), [i], []);
     }
   }
+
+
 
   // 4. Deduplicate and normalize cycles
   const uniqueLoops = [];

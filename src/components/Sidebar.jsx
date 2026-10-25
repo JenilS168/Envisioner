@@ -699,7 +699,7 @@ export default function Sidebar({
                       type="checkbox"
                       checked={snapRotation}
                       onChange={onToggleSnapRotation}
-                      style={{ accentColor: '#a78bfa', width: 16, height: 16, cursor: 'pointer' }}
+                      style={{ accentColor: 'var(--accent-primary)', width: 16, height: 16, cursor: 'pointer' }}
                     />
                     <label htmlFor="snap-rotation-toggle" className="form-label" style={{ marginBottom: 0, cursor: 'pointer' }}>
                       Snap rotation to 15°
@@ -737,20 +737,20 @@ export default function Sidebar({
                     )}
                   </div>
 
-                  {/* Catalog */}
-                  <div className="furniture-catalog">
+                  {/* Segmented Stair Shape Selector */}
+                  <div className="seg-pill-control mb-3" role="group" aria-label="Select Stair Shape">
                     {Object.entries(STAIR_CATALOG).map(([type, cat]) => {
                       const isActive = mode === 'stairs' && selectedStairType === type;
                       return (
                         <button
                           key={type}
+                          type="button"
                           id={`stair-catalog-${type}`}
-                          className={`furniture-catalog-btn ${isActive ? 'furniture-catalog-btn-active' : ''}`}
+                          className={`seg-pill-btn ${isActive ? 'active' : ''}`}
                           onClick={() => onSelectStairType && onSelectStairType(type)}
                           title={`Place ${cat.label} Stairs`}
                         >
-                          <span className="furniture-color-chip" style={{ background: '#8b6b45' }} />
-                          <span className="furniture-catalog-label">{cat.label}</span>
+                          {cat.label}
                         </button>
                       );
                     })}
@@ -758,7 +758,7 @@ export default function Sidebar({
 
                   <div className="info-card" style={{ marginTop: '0.75rem' }}>
                     <p className="text-sm text-muted">
-                      In Select mode: drag to move, drag the purple handle for free rotation, <kbd>Del</kbd> to delete.
+                      In Select mode: drag to move, drag the rotation handle, <kbd>Del</kbd> to delete.
                     </p>
                   </div>
                 </>
@@ -777,29 +777,41 @@ export default function Sidebar({
                     </p>
                   </div>
 
-                  {/* Stair Type Change */}
-                  <PresetSelect
-                    label="Shape"
-                    value={selectedStair.type}
-                    onChange={(val) => onCommitStairDimensions && onCommitStairDimensions(selectedStair.id, { type: val })}
-                    options={Object.entries(STAIR_CATALOG).map(([k, v]) => ({ value: k, label: v.label }))}
-                  />
+                  {/* Stair Type Segmented Control */}
+                  <div className="form-group">
+                    <label className="form-label">Stair Shape</label>
+                    <div className="seg-pill-control" role="group" aria-label="Stair Shape">
+                      {Object.entries(STAIR_CATALOG).map(([type, cat]) => {
+                        const isSelected = selectedStair.type === type;
+                        return (
+                          <button
+                            key={type}
+                            type="button"
+                            className={`seg-pill-btn ${isSelected ? 'active' : ''}`}
+                            onClick={() => onCommitStairDimensions && onCommitStairDimensions(selectedStair.id, { type })}
+                          >
+                            {cat.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
 
                   {/* Turn Direction (only for L/U) */}
                   {(selectedStair.type === 'l_shape' || selectedStair.type === 'u_shape') && (
                     <div className="form-group">
                       <label className="form-label">Turn Direction</label>
-                      <div style={{ display: 'flex', gap: '0.5rem' }}>
+                      <div className="seg-pill-control" role="group" aria-label="Turn Direction">
                         <button
-                          className={`btn ${selectedStair.turnDirection === 'left' ? 'btn-primary' : 'btn-secondary'}`}
-                          style={{ flex: 1, padding: '0.25rem' }}
+                          type="button"
+                          className={`seg-pill-btn ${selectedStair.turnDirection === 'left' ? 'active' : ''}`}
                           onClick={() => onStairTurnChange && onStairTurnChange(selectedStair.id, 'left')}
                         >
                           Turn Left
                         </button>
                         <button
-                          className={`btn ${selectedStair.turnDirection === 'right' ? 'btn-primary' : 'btn-secondary'}`}
-                          style={{ flex: 1, padding: '0.25rem' }}
+                          type="button"
+                          className={`seg-pill-btn ${selectedStair.turnDirection === 'right' ? 'active' : ''}`}
                           onClick={() => onStairTurnChange && onStairTurnChange(selectedStair.id, 'right')}
                         >
                           Turn Right
